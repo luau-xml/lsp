@@ -281,6 +281,16 @@ jobs:
       # Skipped rather than failed when the secret is absent: releases should
       # work before a Marketplace account exists, and a rehearsal run
       # (workflow_dispatch, no tag) should not publish anything at all.
+      #
+      # Six targets are six uploads, and they do not succeed or fail together:
+      # one request timing out leaves five published and the job red. So a
+      # target that is already up there is a *skip*, not a failure — otherwise
+      # the re-run that should finish the job dies on the first one that
+      # already made it, and the release can never be completed.
+      #
+      # A real failure still fails the job, but only after the remaining targets
+      # have been tried: stopping at the first leaves the rest for yet another
+      # run, which is the problem this exists to solve.
       - name: Publish to the Marketplace
         if: startsWith(github.ref, 'refs/tags/')
         working-directory: editors/vscode
@@ -292,9 +302,29 @@ jobs:
             echo "::notice::VSCE_PAT is not set — skipping the Marketplace"
             exit 0
           fi
+
+          failed=0
+
           for vsix in ../../vsix/*.vsix; do
-            npx vsce publish --packagePath "$vsix"
+            name=$(basename "$vsix")
+
+            if output=$(npx vsce publish --packagePath "$vsix" 2>&1); then
+              echo "$output"
+              continue
+            fi
+
+            echo "$output"
+
+            if printf '%s' "$output" | grep -Eqi "already (exists|published)"; then
+              echo "::notice::$name is already on the Marketplace — skipping"
+              continue
+            fi
+
+            echo "::error::$name failed to publish to the Marketplace"
+            failed=1
           done
+
+          exit "$failed"
 
       # A meaningful part of the Roblox community uses VSCodium and Cursor, and
       # neither can reach the Marketplace.
@@ -309,6 +339,27 @@ jobs:
             echo "::notice::OVSX_PAT is not set — skipping OpenVSX"
             exit 0
           fi
+
+          failed=0
+
           for vsix in ../../vsix/*.vsix; do
-            npx ovsx publish --packagePath "$vsix" --pat "$OVSX_PAT"
+            name=$(basename "$vsix")
+
+            if output=$(npx ovsx publish --packagePath "$vsix" --pat "$OVSX_PAT" 2>&1); then
+              echo "$output"
+              continue
+            fi
+
+            echo "$output"
+
+            # Same reasoning as the Marketplace above.
+            if printf '%s' "$output" | grep -Eqi "already (exists|published)"; then
+              echo "::notice::$name is already on OpenVSX — skipping"
+              continue
+            fi
+
+            echo "::error::$name failed to publish to OpenVSX"
+            failed=1
           done
+
+          exit "$failed"
