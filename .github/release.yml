@@ -1,0 +1,47 @@
+# How GitHub groups the notes it generates for a release.
+#
+# The categories are driven by the *labels on merged pull requests*, not by
+# commit messages — so a PR that goes in unlabelled lands in "Other changes"
+# rather than going missing. That is what the trailing `*` catch-all is for, and
+# why it must stay last: the first matching category wins.
+#
+# Work pushed straight to main without a pull request does not appear here at
+# all. The "Full Changelog" compare link GitHub appends is what covers that.
+
+changelog:
+  exclude:
+    labels:
+      - skip-changelog
+    authors:
+      - dependabot
+      - github-actions
+
+  categories:
+    - title: Features
+      labels:
+        - feature
+        - enhancement
+
+    - title: Fixes
+      labels:
+        - fix
+        - bug
+
+    - title: Performance
+      labels:
+        - performance
+
+    - title: Documentation
+      labels:
+        - documentation
+
+    - title: Internal
+      labels:
+        - refactor
+        - test
+        - ci
+        - chore
+
+    - title: Other changes
+      labels:
+        - "*"
