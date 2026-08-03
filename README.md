@@ -110,7 +110,7 @@ $ codium --install-extension RyanCundiff.luaux-lsp
    is for exactly one platform. Take the one matching yours:
 
 ```console
-$ code --install-extension luaux-lsp-win32-x64-0.1.0.vsix
+$ code --install-extension luaux-lsp-win32-x64-0.1.1.vsix
 ```
 
 4. **From source**, which needs the compiler as a sibling checkout (see
