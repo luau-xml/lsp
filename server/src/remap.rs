@@ -13,6 +13,7 @@
 //! A wrong position sends people to code they did not write.
 
 use crate::line_index::{LineIndex, Position};
+use crate::project;
 use crate::sourcemap::SourceMap;
 use serde_json::{Map, Value};
 
@@ -114,16 +115,22 @@ impl Remap<'_> {
         Some(Value::Object(out))
     }
 
+    /// Compared as files, not as strings: everything travelling *up* was written
+    /// by luau-lsp, which re-encodes URIs into its own normal form.
     fn is_ours(&self, uri: &str) -> bool {
-        uri == self.source_uri || uri == self.output_uri
+        project::same_file(uri, self.source_uri) || project::same_file(uri, self.output_uri)
     }
 
     fn rewrite_uri(&self, value: &Value) -> Option<String> {
         let uri = value.as_str()?;
 
-        Some(match (self.direction, uri) {
-            (Direction::Down, _) if uri == self.source_uri => self.output_uri.to_string(),
-            (Direction::Up, _) if uri == self.output_uri => self.source_uri.to_string(),
+        Some(match self.direction {
+            Direction::Down if project::same_file(uri, self.source_uri) => {
+                self.output_uri.to_string()
+            }
+            Direction::Up if project::same_file(uri, self.output_uri) => {
+                self.source_uri.to_string()
+            }
             _ => uri.to_string(),
         })
     }
