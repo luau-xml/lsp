@@ -794,18 +794,15 @@ impl Server {
     fn child_diagnostics(&mut self, params: Value) {
         let Some(generated) = params.get("uri").and_then(Value::as_str) else { return };
 
-        let Some(uri) = self
-            .documents
-            .uris()
-            .into_iter()
-            .find(|uri| self.generated_uri(uri).as_deref() == Some(generated))
-        else {
+        let Some(uri) = self.documents.uris().into_iter().find(|uri| {
+            self.generated_uri(uri).is_some_and(|ours| project::same_file(&ours, generated))
+        }) else {
             // A file we do not own — luau-lsp analyses dependencies too, and
             // publishing those against a generated path the author never opened
             // is noise. Unless it is a document we *did* hand over, in which
             // case our own bookkeeping disagrees with itself and that is worth
             // knowing about.
-            if self.opened_in_child.contains(generated) {
+            if self.opened_in_child.iter().any(|ours| project::same_file(ours, generated)) {
                 let generated = generated.to_string();
                 self.log(
                     2,

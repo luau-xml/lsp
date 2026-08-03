@@ -64,17 +64,16 @@ if (target === TARGETS[host]) {
 
 // The local one, not whatever a machine happens to have installed: a runner
 // has none, and a global install is a different version from the lockfile's.
-const vsce = path.join(
-  here,
-  "..",
-  "node_modules",
-  ".bin",
-  process.platform === "win32" ? "vsce.cmd" : "vsce",
-);
+//
+// Its own entry point rather than the `.bin` shim: that shim is `vsce.cmd` on
+// Windows, and since the fix for CVE-2024-27980 Node refuses to `execFile` a
+// `.cmd` without a shell — `EINVAL`, naming neither the file nor the reason.
+// Running the script under this same Node sidesteps the shim on every platform.
+const vsce = path.join(here, "..", "node_modules", "@vscode", "vsce", "vsce");
 
 if (!fs.existsSync(vsce)) {
   console.error(`no vsce at ${vsce} — run \`npm install\` first`);
   process.exit(1);
 }
 
-execFileSync(vsce, ["package", "--target", target], { stdio: "inherit" });
+execFileSync(process.execPath, [vsce, "package", "--target", target], { stdio: "inherit" });

@@ -103,11 +103,11 @@ impl Server {
     }
 
     pub fn uri(&self) -> String {
-        format!("file://{}", self.file.display())
+        uri_of(&self.file)
     }
 
     pub fn build_uri(&self) -> String {
-        format!("file://{}", self.root.join("build").join("App.luau").display())
+        uri_of(&self.root.join("build").join("App.luau"))
     }
 
     /// A `{ textDocument, position }` for this document.
@@ -125,9 +125,9 @@ impl Server {
             "initialize",
             json!({
                 "processId": std::process::id(),
-                "rootUri": format!("file://{}", self.root.display()),
+                "rootUri": uri_of(&self.root),
                 "workspaceFolders": [{
-                    "uri": format!("file://{}", self.root.display()),
+                    "uri": uri_of(&self.root),
                     "name": "test",
                 }],
                 // What VS Code actually advertises. Pull diagnostics above
@@ -313,6 +313,35 @@ impl Server {
             }
         }
     }
+}
+
+/// A URI the way VS Code writes one.
+///
+/// Deliberately not the server's own `path_to_uri`: a harness that encodes with
+/// the code under test agrees with it by construction, including where both are
+/// wrong. This imitates the client instead — forward slashes, and everything
+/// outside the unreserved set percent-encoded, the drive colon included. That
+/// last part is the whole point on Windows, where `file://{path}` yields
+/// `file://C:\a\b`, which is not a URI any editor sends and which the server
+/// rightly refuses to turn into a path.
+fn uri_of(path: &Path) -> String {
+    let text = path.to_string_lossy().replace('\\', "/");
+    let mut out = String::from("file://");
+
+    if !text.starts_with('/') {
+        out.push('/');
+    }
+
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+
+    out
 }
 
 /// One `Content-Length`-framed message, or `None` at end of stream.

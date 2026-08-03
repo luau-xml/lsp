@@ -1,11 +1,16 @@
 import fs from "fs";
+import os from "os";
 import path from "path";
+import url from "url";
 import onigModule from "vscode-oniguruma";
 const oniguruma = onigModule.default ?? onigModule;
 import tmModule from "vscode-textmate";
 const textmate = tmModule.default ?? tmModule;
 
-const HERE = path.dirname(new URL(import.meta.url).pathname);
+// `fileURLToPath`, not `.pathname`: on Windows the latter is
+// `/C:/Users/Ryan%20Cundiff/…`, which joins into `C:\C:\Users\Ryan%20Cundiff\…`
+// and opens nothing.
+const HERE = path.dirname(url.fileURLToPath(import.meta.url));
 const EXT = path.resolve(HERE, "..");
 // The Luau grammar comes from the luau-lsp extension. Version-agnostic so this
 // keeps working across upgrades.
@@ -16,7 +21,9 @@ function findLuauGrammar() {
   // A CI runner has no VS Code at all, so this is an ordinary absence rather
   // than an error worth a stack trace. `LUAUX_LUAU_GRAMMAR` is how CI supplies
   // it; the message below says so.
-  const root = path.join(process.env.HOME ?? "", ".vscode/extensions");
+  // `homedir()` rather than `$HOME`, which Windows does not set — the same
+  // reason the server reaches for `home_dir` there.
+  const root = path.join(os.homedir(), ".vscode/extensions");
   let installed = [];
   try {
     installed = fs.readdirSync(root);
