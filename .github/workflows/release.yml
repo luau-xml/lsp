@@ -265,32 +265,6 @@ jobs:
           files: vsix/*.vsix
           fail_on_unmatched_files: true
           generate_release_notes: true
-          body: |
-            ### Install
-
-            One `.vsix` per platform: the extension bundles a server binary, and a
-            binary is for exactly one platform. The target is in the manifest as
-            well as the filename, so VS Code refuses a mismatched build rather
-            than failing at run time.
-
-            | Platform            | Asset                          |
-            | ------------------- | ------------------------------ |
-            | Windows (x64)       | `luaux-lsp-win32-x64-*.vsix`   |
-            | Windows (arm64)     | `luaux-lsp-win32-arm64-*.vsix` |
-            | macOS (Apple)       | `luaux-lsp-darwin-arm64-*.vsix`|
-            | macOS (Intel)       | `luaux-lsp-darwin-x64-*.vsix`  |
-            | Linux (x64)         | `luaux-lsp-linux-x64-*.vsix`   |
-            | Linux (arm64)       | `luaux-lsp-linux-arm64-*.vsix` |
-
-            ```console
-            $ code --install-extension luaux-lsp-<target>-<version>.vsix
-            ```
-
-            Also on the [Marketplace](https://marketplace.visualstudio.com/items?itemName=RyanCundiff.luaux-lsp)
-            and [OpenVSX](https://open-vsx.org/extension/RyanCundiff/luaux-lsp),
-            where the right build is chosen for you.
-
-            ---
 
       - name: Install the publishing tools
         working-directory: editors/vscode
