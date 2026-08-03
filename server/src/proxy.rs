@@ -173,7 +173,10 @@ fn on_path(name: &str, path: Option<OsString>) -> Option<PathBuf> {
 /// What the binary may be called on this platform.
 ///
 /// Windows carries the extension in the filename, so a `luau-lsp` on `PATH` is
-/// `luau-lsp.exe` there and joining the bare name finds nothing at all.
+/// `luau-lsp.exe` there and joining the bare name finds nothing at all. Every
+/// lookup below goes through here for that reason: rokit's storage and the
+/// luau-lsp extension name their files the same way `PATH` does, and a fallback
+/// that only ever matches on Unix is a fallback Windows does not have.
 fn filenames(name: &str) -> impl Iterator<Item = String> + '_ {
     #[cfg(windows)]
     let endings: &[&str] = &[".exe", ".cmd", ".bat", ""];
@@ -187,8 +190,8 @@ fn filenames(name: &str) -> impl Iterator<Item = String> + '_ {
 ///
 /// A last resort, and a good one: someone editing `.luaux` almost certainly has
 /// that extension, and its copy is the exact build their editor already uses for
-/// `.luau`. It is installed as `bin/server` rather than under the tool's name,
-/// so nothing above finds it.
+/// `.luau`. It is installed as `bin/server` — `bin/server.exe` on Windows —
+/// rather than under the tool's name, so nothing above finds it.
 fn vscode_extension(name: &str) -> Option<PathBuf> {
     if name != "luau-lsp" {
         return None;
@@ -207,8 +210,14 @@ fn vscode_extension(name: &str) -> Option<PathBuf> {
                 continue;
             }
 
-            let binary = entry.path().join("bin").join("server");
-            if is_executable(&binary) && newest.as_ref().is_none_or(|(best, _)| label > *best) {
+            let bin = entry.path().join("bin");
+            let Some(binary) =
+                filenames("server").map(|file| bin.join(file)).find(|path| is_executable(path))
+            else {
+                continue;
+            };
+
+            if newest.as_ref().is_none_or(|(best, _)| label > *best) {
                 newest = Some((label, binary));
             }
         }
@@ -234,10 +243,12 @@ fn rokit_tool(name: &str) -> Option<PathBuf> {
         let Ok(versions) = std::fs::read_dir(&tool) else { continue };
 
         for version in versions.flatten() {
-            let binary = version.path().join(name);
-            if !is_executable(&binary) {
+            let stored = version.path();
+            let Some(binary) =
+                filenames(name).map(|file| stored.join(file)).find(|path| is_executable(path))
+            else {
                 continue;
-            }
+            };
 
             let label = version.file_name().to_string_lossy().into_owned();
             if newest.as_ref().is_none_or(|(best, _)| label > *best) {
