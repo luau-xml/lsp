@@ -6,7 +6,7 @@ resolver = "2"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/luau-xml/luaux-lsp"
+repository = "https://github.com/luau-xml/lsp"
 
 # The server needs the compiler as a *library* — spans, the resolver's bindings,
 # the Roblox class tables, the source map. That coupling is managed rather than
@@ -17,4 +17,12 @@ repository = "https://github.com/luau-xml/luaux-lsp"
 # server built against a different compiler than the one producing `build/`
 # reports diagnostics the build does not.
 [workspace.dependencies]
-luaux = { path = "../luaux/crates/luaux" }
+#
+# `version` as well as `path`, because a path alone cannot be published: crates.io
+# strips the path and resolves the dependency from the registry, so a dependency
+# with no version requirement is rejected outright.
+#
+# Exact, for the reason above this: `^0.1.1` would let a patch release of the
+# compiler drift under a server that was never built against it, which is the one
+# thing this file and LUAUX_PIN exist to prevent. Bumping it is deliberate work.
+luaux = { path = "../luaux/crates/luaux", version = "=0.1.1" }
