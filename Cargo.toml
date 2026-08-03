@@ -1,0 +1,20 @@
+[workspace]
+members = ["server"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/luau-xml/luaux-lsp"
+
+# The server needs the compiler as a *library* — spans, the resolver's bindings,
+# the Roblox class tables, the source map. That coupling is managed rather than
+# avoided.
+#
+# Development uses a sibling checkout, which is also what CI arranges: it clones
+# luaux at the revision in `LUAUX_PIN` into `../luaux`. Pin, never float — a
+# server built against a different compiler than the one producing `build/`
+# reports diagnostics the build does not.
+[workspace.dependencies]
+luaux = { path = "../luaux/crates/luaux" }

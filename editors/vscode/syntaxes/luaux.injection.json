@@ -1,0 +1,327 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "LuauX",
+  "scopeName": "luaux.injection",
+  "comment": "LuauX layered over source.luau. TextMate is regex-only, so it cannot do the previous-token analysis the compiler uses to tell `<Frame/>` from `a < b`. The heuristic here is that a tag is `<` immediately followed by a name and then whitespace, `/` or `>` \u2014 `a < b` has a space after `<`, so it is left alone. `a <b` is the case that can still mis-highlight; it is cosmetic, and the compiler remains the authority. Injected rather than layered so it still applies inside Luau's own blocks \u2014 `return (<Frame/>)` puts the LuauX inside a parenthesised expression.",
+  "injectionSelector": "L:source.luaux -comment -string.quoted -string.interpolated",
+  "patterns": [
+    {
+      "include": "#markup"
+    }
+  ],
+  "repository": {
+    "markup": {
+      "patterns": [
+        {
+          "include": "#comment"
+        },
+        {
+          "include": "#fragmentEnteringMarkup"
+        },
+        {
+          "include": "#elementEnteringMarkup"
+        }
+      ]
+    },
+    "comment": {
+      "name": "comment.block.luaux",
+      "begin": "<!--",
+      "end": "-->",
+      "captures": {
+        "0": {
+          "name": "punctuation.definition.comment.luaux"
+        }
+      },
+      "comment": "`<!--` rather than `<--`, because `<--` collides with real Luau: `a <--[[c]] b` is a valid comparison with a block comment between, and a regex-only highlighter cannot tell that from a LuauX comment \u2014 it would swallow the rest of the file hunting for `-->`. `!` is not a Luau token at all, so `<!--` cannot collide by construction."
+    },
+    "fragment": {
+      "name": "meta.tag.fragment.luaux",
+      "begin": "(<)(>)",
+      "beginCaptures": {
+        "1": {
+          "name": "punctuation.definition.tag.begin.luaux"
+        },
+        "2": {
+          "name": "punctuation.definition.tag.end.luaux"
+        }
+      },
+      "end": "(</)(>)",
+      "endCaptures": {
+        "1": {
+          "name": "punctuation.definition.tag.begin.luaux"
+        },
+        "2": {
+          "name": "punctuation.definition.tag.end.luaux"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#children"
+        }
+      ]
+    },
+    "element": {
+      "name": "meta.tag.luaux",
+      "comment": "The element consumes its own `/>`, and the attribute section stops *before* it. An earlier version had attributes consume `/>` and ended the element on a zero-width `(?<=/>)` lookbehind \u2014 which a self-closing *child* also satisfied, silently closing the parent and leaving its real closing tag unmatched.",
+      "begin": "(<)([_A-Za-z][_A-Za-z0-9]*(?:\\.[_A-Za-z0-9]+)*)(?=[\\s/>])",
+      "beginCaptures": {
+        "1": {
+          "name": "punctuation.definition.tag.begin.luaux"
+        },
+        "2": {
+          "name": "entity.name.tag.luaux"
+        }
+      },
+      "end": "(/>)|(</)([_A-Za-z][_A-Za-z0-9]*(?:\\.[_A-Za-z0-9]+)*)?\\s*(>)",
+      "endCaptures": {
+        "1": {
+          "name": "punctuation.definition.tag.end.luaux"
+        },
+        "2": {
+          "name": "punctuation.definition.tag.begin.luaux"
+        },
+        "3": {
+          "name": "entity.name.tag.luaux"
+        },
+        "4": {
+          "name": "punctuation.definition.tag.end.luaux"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#attributes"
+        },
+        {
+          "include": "#children"
+        }
+      ]
+    },
+    "attribute": {
+      "patterns": [
+        {
+          "include": "#spread"
+        },
+        {
+          "include": "#attributeAssignment"
+        },
+        {
+          "include": "#attributeShorthand"
+        }
+      ]
+    },
+    "spread": {
+      "comment": "`{props}` in attribute position.",
+      "name": "meta.embedded.block.luau",
+      "begin": "\\{",
+      "end": "\\}",
+      "captures": {
+        "0": {
+          "name": "punctuation.section.embedded.luaux"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#luauNested"
+        }
+      ]
+    },
+    "attributeAssignment": {
+      "begin": "([_A-Za-z][_A-Za-z0-9]*)\\s*(=)",
+      "beginCaptures": {
+        "1": {
+          "name": "entity.other.attribute-name.luaux"
+        },
+        "2": {
+          "name": "keyword.operator.assignment.luaux"
+        }
+      },
+      "end": "(?<=[\\}\"'])|(?=[\\s/>])",
+      "patterns": [
+        {
+          "include": "#expression"
+        },
+        {
+          "include": "#attributeString"
+        }
+      ]
+    },
+    "attributeShorthand": {
+      "comment": "`Visible`, meaning true.",
+      "match": "[_A-Za-z][_A-Za-z0-9]*",
+      "name": "entity.other.attribute-name.luaux"
+    },
+    "attributeString": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.luaux",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.luaux",
+              "match": "\\\\."
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.single.luaux",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            {
+              "name": "constant.character.escape.luaux",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "children": {
+      "patterns": [
+        {
+          "include": "#comment"
+        },
+        {
+          "include": "#expression"
+        },
+        {
+          "include": "#fragment"
+        },
+        {
+          "include": "#element"
+        },
+        {
+          "include": "#text"
+        }
+      ]
+    },
+    "expression": {
+      "comment": "`{expr}` \u2014 ordinary Luau, which is why it re-enters source.luau.",
+      "name": "meta.embedded.block.luau",
+      "begin": "\\{",
+      "end": "\\}",
+      "captures": {
+        "0": {
+          "name": "punctuation.section.embedded.luaux"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#luauNested"
+        }
+      ]
+    },
+    "luauNested": {
+      "comment": "Inside a `{...}` hole, LuauX can nest again \u2014 `{cond and <X/> or nil}`.",
+      "patterns": [
+        {
+          "include": "#nestedBraces"
+        },
+        {
+          "include": "#markup"
+        },
+        {
+          "include": "source.luau"
+        }
+      ]
+    },
+    "nestedBraces": {
+      "comment": "Keeps a Luau table literal from closing the surrounding hole.",
+      "begin": "\\{",
+      "end": "\\}",
+      "patterns": [
+        {
+          "include": "#luauNested"
+        }
+      ]
+    },
+    "text": {
+      "comment": "Raw text between tags. Scoped as a string so an apostrophe in `don't` cannot open a Luau string.",
+      "name": "string.unquoted.luaux",
+      "match": "[^<>{}\\\\]+|\\\\.",
+      "captures": {
+        "0": {
+          "name": "string.unquoted.luaux"
+        }
+      }
+    },
+    "attributes": {
+      "begin": "\\G",
+      "end": "(?=/>)|(>)",
+      "endCaptures": {
+        "1": {
+          "name": "punctuation.definition.tag.end.luaux"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#attribute"
+        }
+      ],
+      "comment": "`\\G` anchors to where the tag name ended, so this only runs for *this* element's attributes; without it a nested `<Tag` matched here instead of opening its own block. Ends before `/>` so the element can consume it."
+    },
+    "elementEnteringMarkup": {
+      "name": "meta.tag.luaux",
+      "comment": "Identical to `element` but for the lookbehind, which is what makes a `<` an opening tag rather than a comparison or a type argument. It belongs *here* and not on `element` itself: this rule is how markup is entered from Luau, where `Source<T>` and `a<b` are the things to keep out. Between children the character before a `<` is ordinary text, and guarding there stops `<TextLabel>Hi<Row/></TextLabel>` \u2014 the child's `/>` then closes the parent, which is the exact failure `element`'s own comment describes. `entering_markup_matches_the_shared_rule` in the grammar tests keeps the two from drifting.",
+      "begin": "(?<![_A-Za-z0-9)\\]])(<)([_A-Za-z][_A-Za-z0-9]*(?:\\.[_A-Za-z0-9]+)*)(?=[\\s/>])",
+      "beginCaptures": {
+        "1": {
+          "name": "punctuation.definition.tag.begin.luaux"
+        },
+        "2": {
+          "name": "entity.name.tag.luaux"
+        }
+      },
+      "end": "(/>)|(</)([_A-Za-z][_A-Za-z0-9]*(?:\\.[_A-Za-z0-9]+)*)?\\s*(>)",
+      "endCaptures": {
+        "1": {
+          "name": "punctuation.definition.tag.end.luaux"
+        },
+        "2": {
+          "name": "punctuation.definition.tag.begin.luaux"
+        },
+        "3": {
+          "name": "entity.name.tag.luaux"
+        },
+        "4": {
+          "name": "punctuation.definition.tag.end.luaux"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#attributes"
+        },
+        {
+          "include": "#children"
+        }
+      ]
+    },
+    "fragmentEnteringMarkup": {
+      "name": "meta.tag.fragment.luaux",
+      "begin": "(?<![_A-Za-z0-9)\\]])(<)(>)",
+      "beginCaptures": {
+        "1": {
+          "name": "punctuation.definition.tag.begin.luaux"
+        },
+        "2": {
+          "name": "punctuation.definition.tag.end.luaux"
+        }
+      },
+      "end": "(</)(>)",
+      "endCaptures": {
+        "1": {
+          "name": "punctuation.definition.tag.begin.luaux"
+        },
+        "2": {
+          "name": "punctuation.definition.tag.end.luaux"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#children"
+        }
+      ],
+      "comment": "Identical to `fragment` but for the lookbehind, which is what makes a `<` an opening tag rather than a comparison or a type argument. It belongs *here* and not on `fragment` itself: this rule is how markup is entered from Luau, where `Source<T>` and `a<b` are the things to keep out. Between children the character before a `<` is ordinary text, and guarding there stops `<TextLabel>Hi<Row/></TextLabel>` \u2014 the child's `/>` then closes the parent, which is the exact failure `element`'s own comment describes. `entering_markup_matches_the_shared_rule` in the grammar tests keeps the two from drifting."
+    }
+  }
+}

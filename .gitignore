@@ -1,0 +1,8 @@
+/target
+node_modules/
+editors/vscode/out/
+editors/vscode/server/
+*.vsix
+/*.md
+!README.md
+.DS_Store

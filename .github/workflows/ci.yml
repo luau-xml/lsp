@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A new push supersedes the one before it, so let the obsolete run go rather
+# than paying for a result nobody will read. Keyed by ref, so main and each PR
+# cancel only themselves.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  server:
+    name: server (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: luaux-lsp
+
+      # The server needs the compiler as a library, at the revision recorded in
+      # LUAUX_PIN. Pin, never float: a server built against a different compiler
+      # than the one producing `build/` reports diagnostics the build does not.
+      - name: Read the compiler pin
+        id: pin
+        shell: bash
+        run: |
+          cd luaux-lsp
+          echo "repository=$(sed -n 's/^repository = //p' LUAUX_PIN)" >> "$GITHUB_OUTPUT"
+          echo "rev=$(sed -n 's/^rev = //p' LUAUX_PIN)" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the pinned compiler
+        uses: actions/checkout@v4
+        with:
+          repository: luau-xml/luaux
+          ref: ${{ steps.pin.outputs.rev }}
+          path: luaux
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: luaux-lsp
+
+      # luau-lsp is optional at runtime and the tests that need it skip
+      # themselves without it — but a proxy nothing ever proxies through is not
+      # a tested proxy, so CI installs one.
+      - name: Install luau-lsp
+        uses: CompeyDev/setup-rokit@v0.1.2
+        continue-on-error: true
+
+      # Scoped to our own package: the pinned compiler is a checkout, not
+      # something this repository gets to reformat or lint.
+      - run: cargo fmt -p luaux-lsp --check
+        working-directory: luaux-lsp
+
+      - run: cargo clippy -p luaux-lsp --all-targets -- -D warnings
+        working-directory: luaux-lsp
+
+      - run: cargo test -p luaux-lsp
+        working-directory: luaux-lsp
+
+  grammar:
+    name: grammar
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # The Luau grammar ships inside the luau-lsp extension, which a runner
+      # does not have. These checks are about how our injection *composes* with
+      # Luau's grammar, so without it they would not be testing anything.
+      #
+      # Pinned to a release rather than `main`, for the same reason LUAUX_PIN is:
+      # a grammar that changes underneath us should be a deliberate update, not a
+      # red build one morning.
+      - name: Fetch the Luau grammar
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/Luau.tmLanguage.json" \
+            https://raw.githubusercontent.com/JohnnyMorganz/luau-lsp/1.69.0/editors/code/syntaxes/Luau.tmLanguage.json
+
+      # The tokenization checks, run against the real TextMate engine.
+      - run: npm install
+        working-directory: editors/vscode/test
+
+      - run: npm test
+        working-directory: editors/vscode/test
+        env:
+          LUAUX_LUAU_GRAMMAR: ${{ runner.temp }}/Luau.tmLanguage.json
+
+  extension:
+    name: extension
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - run: npm install
+        working-directory: editors/vscode
+
+      - run: npm run compile
+        working-directory: editors/vscode

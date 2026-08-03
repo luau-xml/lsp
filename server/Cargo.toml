@@ -1,0 +1,16 @@
+[package]
+name = "luaux-lsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Language server for LuauX — owns .luaux, proxies a stock luau-lsp"
+
+[[bin]]
+name = "luaux-lsp"
+path = "src/main.rs"
+
+[dependencies]
+luaux = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -1,0 +1,4 @@
+# Let a struct literal or a call stay on one line when it fits. The default
+# wraps at a fraction of the width, which turns short, readable expressions into
+# five-line blocks and pushes the code that matters further apart.
+use_small_heuristics = "Max"

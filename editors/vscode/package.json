@@ -1,0 +1,118 @@
+{
+  "name": "luaux-lsp",
+  "displayName": "LuauX LSP",
+  "description": "Editor support for .luaux \u2014 highlighting, completion and diagnostics for LuauX, JSX-style markup for Luau",
+  "version": "0.1.0",
+  "publisher": "RyanCundiff",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/luau-xml/luaux-lsp"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "luaux",
+        "aliases": [
+          "LuauX",
+          "luaux"
+        ],
+        "extensions": [
+          ".luaux"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "luaux",
+        "scopeName": "source.luaux",
+        "path": "./syntaxes/luaux.tmLanguage.json",
+        "embeddedLanguages": {
+          "meta.embedded.block.luau": "luau"
+        }
+      },
+      {
+        "scopeName": "luaux.injection",
+        "path": "./syntaxes/luaux.injection.json",
+        "injectTo": [
+          "source.luaux"
+        ]
+      }
+    ],
+    "configuration": {
+      "title": "LuauX",
+      "properties": {
+        "luaux.server.path": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path to `luaux-lsp`. Empty searches `PATH`, then rokit's tool storage, then the copy bundled with this extension."
+        },
+        "luaux.luauLsp.path": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path to `luau-lsp`, which answers the Luau half. Empty searches the same places. If it is not found, LuauX still works and simply answers nothing that needed Luau types."
+        },
+        "luaux.autoClosingTags": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Close a tag as you finish opening it: typing `<Frame>` puts `</Frame>` after the cursor."
+        },
+        "luaux.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Log traffic between the editor and the LuauX server."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "luaux.restartServer",
+        "title": "Restart Server",
+        "category": "LuauX"
+      }
+    ],
+    "semanticTokenScopes": [
+      {
+        "language": "luaux",
+        "scopes": {
+          "class": [
+            "entity.name.tag.luaux"
+          ],
+          "function": [
+            "support.class.component.luaux",
+            "entity.name.function"
+          ]
+        }
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -watch -p .",
+    "package": "node scripts/package.mjs",
+    "test": "cd test && npm test"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.75.0",
+    "@vscode/vsce": "^3.2.0",
+    "ovsx": "^0.10.1",
+    "typescript": "^5.4.0"
+  }
+}

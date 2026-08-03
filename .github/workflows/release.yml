@@ -1,0 +1,176 @@
+name: Release
+
+# One `.vsix` per platform, because the extension bundles a server binary and a
+# binary is for exactly one platform. An untagged build installs anywhere and
+# works in one place: on any other it dies with `cannot execute binary file`,
+# and the client reports `write EPIPE` five times without naming the reason.
+#
+# Every target builds on its own runner rather than cross-compiling. The whole
+# dependency tree is pure Rust, so cross-building does work — but a native build
+# is the one that also *runs* its own tests, and needs no linker arrangements to
+# stay correct.
+
+on:
+  push:
+    tags: ["v*"]
+  # So a release can be rehearsed without inventing a tag.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            os: macos-latest
+            rust: aarch64-apple-darwin
+          - target: darwin-x64
+            os: macos-latest
+            rust: x86_64-apple-darwin
+          - target: linux-x64
+            os: ubuntu-latest
+            rust: x86_64-unknown-linux-gnu
+          - target: linux-arm64
+            os: ubuntu-24.04-arm
+            rust: aarch64-unknown-linux-gnu
+          - target: win32-x64
+            os: windows-latest
+            rust: x86_64-pc-windows-msvc
+          - target: win32-arm64
+            os: windows-11-arm
+            rust: aarch64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: luaux-lsp
+
+      # The same pin CI builds against. A server released against a different
+      # compiler than the one producing `build/` reports diagnostics the build
+      # does not.
+      - name: Read the compiler pin
+        id: pin
+        shell: bash
+        run: |
+          cd luaux-lsp
+          echo "rev=$(sed -n 's/^rev = //p' LUAUX_PIN)" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the pinned compiler
+        uses: actions/checkout@v4
+        with:
+          repository: luau-xml/luaux
+          ref: ${{ steps.pin.outputs.rev }}
+          path: luaux
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build the server
+        working-directory: luaux-lsp
+        run: cargo build --release --target ${{ matrix.rust }}
+
+      # Where the extension looks for it, and what `package.mjs` checks.
+      - name: Bundle the server
+        shell: bash
+        working-directory: luaux-lsp/editors/vscode
+        run: |
+          mkdir -p server
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "../../target/${{ matrix.rust }}/release/luaux-lsp.exe" server/luaux-lsp.exe
+          else
+            cp "../../target/${{ matrix.rust }}/release/luaux-lsp" server/luaux-lsp
+          fi
+
+      - name: Package
+        working-directory: luaux-lsp/editors/vscode
+        run: |
+          npm install
+          npm run compile
+          npm run package -- ${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: luaux-lsp/editors/vscode/*.vsix
+          if-no-files-found: error
+
+  release:
+    name: publish
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: vsix
+          merge-multiple: true
+
+      - run: ls -l vsix
+
+      # Always. A GitHub Release needs no account and no secret, so this is the
+      # channel that cannot silently fail to exist.
+      - name: Attach to the release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: vsix/*.vsix
+          fail_on_unmatched_files: true
+
+      - name: Install the publishing tools
+        working-directory: editors/vscode
+        run: npm install
+
+      # Skipped rather than failed when the secret is absent: releases should
+      # work before a Marketplace account exists, and a rehearsal run
+      # (workflow_dispatch, no tag) should not publish anything at all.
+      - name: Publish to the Marketplace
+        if: startsWith(github.ref, 'refs/tags/')
+        working-directory: editors/vscode
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        shell: bash
+        run: |
+          if [ -z "${VSCE_PAT:-}" ]; then
+            echo "::notice::VSCE_PAT is not set — skipping the Marketplace"
+            exit 0
+          fi
+          for vsix in ../../vsix/*.vsix; do
+            npx vsce publish --packagePath "$vsix"
+          done
+
+      # A meaningful part of the Roblox community uses VSCodium and Cursor, and
+      # neither can reach the Marketplace.
+      - name: Publish to OpenVSX
+        if: startsWith(github.ref, 'refs/tags/')
+        working-directory: editors/vscode
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        shell: bash
+        run: |
+          if [ -z "${OVSX_PAT:-}" ]; then
+            echo "::notice::OVSX_PAT is not set — skipping OpenVSX"
+            exit 0
+          fi
+          for vsix in ../../vsix/*.vsix; do
+            npx ovsx publish --packagePath "$vsix" --pat "$OVSX_PAT"
+          done

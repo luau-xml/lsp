@@ -1,0 +1,13 @@
+# The compiler revision this server is built and tested against.
+#
+# Pin, never float. A language server built against a different compiler version
+# than the one producing `build/` reports diagnostics the build does not, which
+# is worse than reporting none.
+#
+# CI clones this revision into `../luaux`, which is where the workspace's path
+# dependency points — so local development and CI compile the same two crates
+# against each other.
+
+repository = https://github.com/luau-xml/luaux
+rev = main
+version = 0.1.0

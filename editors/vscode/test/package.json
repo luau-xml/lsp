@@ -1,0 +1,10 @@
+{
+  "name": "luaux-grammar-test",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node spec.mjs" },
+  "devDependencies": {
+    "vscode-oniguruma": "^2.0.1",
+    "vscode-textmate": "^9.0.0"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "luaux",
+  "scopeName": "source.luaux",
+  "comment": "`.luaux` is Luau plus LuauX. Luau is included wholesale; LuauX arrives via the injection in luaux.injection.json.",
+  "patterns": [
+    {
+      "include": "source.luau"
+    }
+  ]
+}
