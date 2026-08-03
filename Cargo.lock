@@ -174,7 +174,7 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
 name = "luaux"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "full_moon",
  "globset",
@@ -184,7 +184,7 @@ dependencies = [
 
 [[package]]
 name = "luaux-lsp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "luaux",
  "serde",

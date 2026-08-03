@@ -9,5 +9,5 @@
 # against each other.
 
 repository = https://github.com/luau-xml/luaux
-rev = main
-version = 0.1.1
+rev = c5a47612e200200a8977229cce7a7133e64f2e04
+version = 0.1.2
