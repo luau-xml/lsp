@@ -197,9 +197,14 @@ jobs:
       # publishing steps below: a release should work before an account exists,
       # and a rehearsal run should publish nothing at all.
       #
-      # No guard against a version that is already up there. crates.io refuses a
-      # duplicate by itself, and re-running a tag is deliberate enough that the
-      # error is the right answer rather than a silent success.
+      # A version already on crates.io is a skip too, for the reason the
+      # Marketplace step gives: a release is several publishes that do not
+      # succeed together, and a re-run finishing the ones that failed must not
+      # die on the ones that did not. crates.io cannot be re-published over, so
+      # "already uploaded" is the state this step wanted anyway.
+      #
+      # `tee` rather than capturing: publishing compiles the crate, and a step
+      # that prints nothing until it ends looks hung.
       - name: Publish to crates.io
         if: startsWith(github.ref, 'refs/tags/')
         working-directory: luaux-lsp
@@ -211,7 +216,20 @@ jobs:
             echo "::notice::CARGO_REGISTRY_TOKEN is not set — skipping crates.io"
             exit 0
           fi
-          cargo publish -p luaux-lsp
+
+          log=$(mktemp)
+
+          if cargo publish -p luaux-lsp 2>&1 | tee "$log"; then
+            exit 0
+          fi
+
+          if grep -Eqi "already (uploaded|exists|published)" "$log"; then
+            echo "::notice::this version is already on crates.io — skipping"
+            exit 0
+          fi
+
+          echo "::error::publishing to crates.io failed"
+          exit 1
 
   release:
     name: publish
