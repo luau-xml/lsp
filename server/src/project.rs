@@ -149,10 +149,15 @@ impl Projects {
 ///
 /// Percent-decoding is not optional: a project under `My Documents` arrives as
 /// `My%20Documents`, and every path built from it would otherwise miss.
+/// Decoding comes first for the same reason: VS Code sends the drive colon
+/// encoded too — `file:///c%3A/Users/…` — so the `c:` the next step looks for is
+/// not in the raw text at all, and testing before decoding leaves the leading
+/// slash on a Windows path.
 pub fn uri_to_path(uri: &str) -> Option<PathBuf> {
-    let rest = uri.strip_prefix("file://")?;
+    let decoded = percent_decode(uri.strip_prefix("file://")?);
+
     // `file:///c:/…` on Windows, `file:///home/…` elsewhere.
-    let rest = rest.strip_prefix('/').map(|tail| {
+    let path = decoded.strip_prefix('/').map(|tail| {
         if tail.len() > 1 && tail.as_bytes()[1] == b':' {
             tail.to_string()
         } else {
@@ -160,12 +165,22 @@ pub fn uri_to_path(uri: &str) -> Option<PathBuf> {
         }
     })?;
 
-    Some(PathBuf::from(percent_decode(&rest)))
+    Some(PathBuf::from(path))
 }
 
 /// Path → `file://` URI.
+///
+/// The separator has to be translated, not just escaped. `\` is not a URI
+/// separator, so a Windows path left as it is percent-encodes into the segment
+/// — `…/project%5Cbuild%5CApp.luau`, one long filename — and luau-lsp, handed
+/// that, opens nothing and answers nothing. On Unix a backslash is an ordinary
+/// character in a filename, so this must happen only where it is a separator.
 pub fn path_to_uri(path: &Path) -> String {
     let text = path.to_string_lossy();
+
+    #[cfg(windows)]
+    let text = text.replace('\\', "/");
+
     let mut out = String::from("file://");
 
     if !text.starts_with('/') {
@@ -182,6 +197,41 @@ pub fn path_to_uri(path: &Path) -> String {
     }
 
     out
+}
+
+/// Whether two `file://` URIs name the same file.
+///
+/// String equality is not enough for anything that came back from luau-lsp. It
+/// re-encodes what it is handed into its own normal form — `file:///c%3A/…`,
+/// drive lowercased — so the URI it publishes under is not the one it was
+/// given. Comparing the strings drops every diagnostic it produces, and leaves
+/// a definition pointing at `build/App.luau`: the exact "sent to code you did
+/// not write" this design refuses elsewhere.
+///
+/// Unix has no drive letter and nothing needing that encoding, so both forms
+/// coincide there — which is why comparing strings held up until Windows.
+pub fn same_file(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+
+    match (uri_to_path(left), uri_to_path(right)) {
+        (Some(left), Some(right)) => same_path(&left, &right),
+        _ => false,
+    }
+}
+
+/// Windows compares paths case-insensitively, and `C:` against `c:` is the case
+/// that actually arrives.
+#[cfg(windows)]
+fn same_path(left: &Path, right: &Path) -> bool {
+    let key = |path: &Path| path.to_string_lossy().replace('\\', "/").to_lowercase();
+    key(left) == key(right)
+}
+
+#[cfg(not(windows))]
+fn same_path(left: &Path, right: &Path) -> bool {
+    left == right
 }
 
 fn percent_decode(text: &str) -> String {
@@ -257,6 +307,53 @@ mod tests {
     fn a_space_arrives_percent_encoded() {
         assert_eq!(path_to_uri(Path::new("/a b")), "file:///a%20b");
         assert_eq!(uri_to_path("file:///a%20b"), Some(PathBuf::from("/a b")));
+    }
+
+    /// What VS Code actually sends on Windows: forward slashes, and the drive
+    /// colon percent-encoded. `path_to_uri` never produces that form, so a
+    /// round-trip through our own encoder cannot catch it.
+    ///
+    /// Deciding the leading slash before decoding leaves `/C:/…`, which is not
+    /// a path Windows opens. The symptom is oblique: analysis still answers,
+    /// because it works on the buffer, while everything that needs the file's
+    /// *place* — the `luaux.toml` above it, and so the casing scheme — quietly
+    /// falls back to defaults.
+    /// The build path is built with [`Path::join`], so it carries native
+    /// separators — and it is handed to luau-lsp as a URI.
+    #[test]
+    #[cfg(windows)]
+    fn a_windows_path_becomes_a_uri_with_uri_separators() {
+        assert_eq!(
+            path_to_uri(Path::new(r"C:\project\build\App.luau")),
+            "file:///C:/project/build/App.luau"
+        );
+
+        assert_eq!(
+            uri_to_path(&path_to_uri(Path::new(r"C:\My Documents\App.luaux"))),
+            Some(PathBuf::from("C:/My Documents/App.luaux"))
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_windows_uri_from_vs_code_resolves() {
+        assert_eq!(
+            uri_to_path("file:///c%3A/Users/x/App.luaux"),
+            Some(PathBuf::from("c:/Users/x/App.luaux"))
+        );
+
+        // The unencoded form other clients send keeps working.
+        assert_eq!(
+            uri_to_path("file:///c:/Users/x/App.luaux"),
+            Some(PathBuf::from("c:/Users/x/App.luaux"))
+        );
+
+        // A space is the ordinary case on Windows, and it is percent-encoded by
+        // every client that sends the drive colon that way.
+        assert_eq!(
+            uri_to_path("file:///c%3A/My%20Documents/App.luaux"),
+            Some(PathBuf::from("c:/My Documents/App.luaux"))
+        );
     }
 
     #[test]
