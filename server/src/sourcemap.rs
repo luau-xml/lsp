@@ -23,11 +23,36 @@ pub struct SourceMap {
     /// Sorted by `source`, and — because emission follows source order — by
     /// `output` as well. [`SourceMap::push`] is what keeps both true.
     runs: Vec<Run>,
+    /// Constructs the builder could not place. A gap costs a feature at that
+    /// position and nothing says so, which is how three of them shipped — so
+    /// the count is kept and can be asserted on.
+    lost: usize,
+    /// Why the map stopped early, if it did. Distinct from `lost`: this is
+    /// coverage abandoned wholesale rather than one construct at a time.
+    abandoned: Option<&'static str>,
 }
 
 impl SourceMap {
     pub fn runs(&self) -> &[Run] {
         &self.runs
+    }
+
+    /// How many constructs could not be placed.
+    pub fn lost(&self) -> usize {
+        self.lost
+    }
+
+    pub fn note_lost(&mut self) {
+        self.lost += 1;
+    }
+
+    /// Why coverage was abandoned wholesale, if it was.
+    pub fn abandoned(&self) -> Option<&'static str> {
+        self.abandoned
+    }
+
+    pub fn abandon(&mut self, reason: &'static str) {
+        self.abandoned.get_or_insert(reason);
     }
 
     pub fn is_empty(&self) -> bool {

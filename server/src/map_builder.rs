@@ -43,7 +43,12 @@ pub fn build(source: &str, output: &str, config: &Config) -> SourceMap {
 
     // Line preservation is the load-bearing assumption. If it does not hold, the
     // whole approach is invalid, so produce nothing rather than something wrong.
+    //
+    // Recorded rather than merely returned: this means the compiler stopped
+    // preserving lines, which has happened, and which costs every Luau answer in
+    // the file with nothing anywhere saying why.
     if source_lines.line_count() != output_lines.line_count() {
+        map.abandon("the generated file has a different number of lines");
         return map;
     }
 
@@ -52,6 +57,8 @@ pub fn build(source: &str, output: &str, config: &Config) -> SourceMap {
         output,
         resolver: &resolver,
         map: &mut map,
+        source_lines: &source_lines,
+        output_lines: &output_lines,
         cursor: 0,
         limit: output.len(),
     };
@@ -60,6 +67,9 @@ pub fn build(source: &str, output: &str, config: &Config) -> SourceMap {
     let mut source_cursor = 0usize;
     let mut output_cursor = 0usize;
     let mut index = 0usize;
+    // Whether the two cursors still correspond. A skipped region breaks that,
+    // and the next region's own line restores it.
+    let mut synced = true;
 
     while index < found.len() {
         // Regions sharing a line have to be mapped as a group: only the last one
@@ -71,15 +81,46 @@ pub fn build(source: &str, output: &str, config: &Config) -> SourceMap {
             last += 1;
         }
 
-        let Some(group_end) =
-            region_output_end(source, output, &source_lines, &output_lines, found[last].end)
-        else {
-            // Without a bound the rest of the file cannot be placed. Stop, and
-            // keep what is already known to be right.
-            return map;
+        let group_end =
+            region_output_end(source, output, &source_lines, &output_lines, found[last].end);
+
+        // A group that cannot be bounded used to end the walk, taking every
+        // later region — the whole rest of the file — with it. Skip just this
+        // one instead: the next group re-establishes both cursors from its own
+        // line, so the damage stops here.
+        let Some(group_end) = group_end else {
+            builder.map.abandon("a region could not be placed in the output");
+            builder.lose();
+
+            synced = false;
+            source_cursor = found[last].end;
+            index = last + 1;
+            continue;
         };
 
-        builder.identity(&mut source_cursor, &mut output_cursor, found[index].start, split);
+        if synced {
+            builder.identity(&mut source_cursor, &mut output_cursor, found[index].start, split);
+        } else {
+            // Out of step after a skipped group, so the stretch in between
+            // cannot be trusted as identical. Resume at this region's own
+            // start, which its line pins independently of anything before it.
+            let Some(start) = region_output_start(
+                source,
+                output,
+                &source_lines,
+                &output_lines,
+                found[index].start,
+            ) else {
+                source_cursor = found[last].end;
+                index = last + 1;
+                continue;
+            };
+
+            // Only the output side needs restoring: the source side is set from
+            // `found[last].end` at the bottom of the loop either way.
+            output_cursor = start;
+            synced = true;
+        }
 
         builder.cursor = output_cursor;
         builder.limit = group_end;
@@ -88,8 +129,18 @@ pub fn build(source: &str, output: &str, config: &Config) -> SourceMap {
             builder.node(&found[step].node);
 
             if step < last {
+                // Source between two regions on one line. The cursor is inside
+                // the region just walked — its own closing punctuation has not
+                // been stepped over — so this needs the same guided step an
+                // expression gets, or a short separator like `, ` is left
+                // unplaceable.
                 let between = found[step].end;
                 let next = found[step + 1].start;
+
+                if let Some(text) = source.get(between..next) {
+                    builder.skip_to(text);
+                }
+
                 builder.verbatim(between, next - between);
             }
         }
@@ -99,8 +150,27 @@ pub fn build(source: &str, output: &str, config: &Config) -> SourceMap {
         index = last + 1;
     }
 
-    builder.identity(&mut source_cursor, &mut output_cursor, source.len(), split);
+    // Guarded like the one in the loop: after a skipped group the two cursors no
+    // longer correspond, and pushing the file's whole tail against a stale
+    // offset leans on `push`'s text check — which is exactly the check that
+    // cannot tell two identical stretches apart.
+    if synced {
+        builder.identity(&mut source_cursor, &mut output_cursor, source.len(), split);
+    }
+
     map
+}
+
+/// The single occurrence of `needle`, or nothing.
+///
+/// Two candidates cannot be told apart by text: [`SourceMap::push`] compares the
+/// same bytes on both sides and agrees for either, so a repeat is refused rather
+/// than guessed at (decision 6). Stepping on by the needle's own length rather
+/// than one byte keeps the slice on a character boundary — an identifier can
+/// begin with a multi-byte character, and `at + 1` panics on it.
+fn unique_match(haystack: &str, needle: &str) -> Option<usize> {
+    let at = haystack.find(needle)?;
+    (!haystack[at + needle.len()..].contains(needle)).then_some(at)
 }
 
 /// Where the generated region ending at `source_end` stops in the output.
@@ -126,6 +196,36 @@ fn region_output_end(
     (end >= output_line_start
         && output.get(end..output_line_end) == source.get(source_end..source_line_end))
     .then_some(end)
+}
+
+/// Where the generated region beginning at `source_start` starts in the output.
+///
+/// The mirror of [`region_output_end`], and used for the same reason in the
+/// opposite direction: everything before a region on its first line is copied
+/// verbatim, so the output line's start plus that prefix is the answer. Verified
+/// the same way, so a line that does not line up yields `None` rather than a
+/// position nothing checked.
+///
+/// This is what lets a region the builder cannot place be *skipped* instead of
+/// ending the walk — without it, one unplaceable region costs every region after
+/// it, which is the whole rest of the file.
+fn region_output_start(
+    source: &str,
+    output: &str,
+    source_lines: &LineIndex,
+    output_lines: &LineIndex,
+    source_start: usize,
+) -> Option<usize> {
+    let line = source_lines.line_of(source_start);
+    let (source_line_start, _) = source_lines.line_range(source, line);
+    let (output_line_start, output_line_end) = output_lines.line_range(output, line);
+
+    let prefix = source_start.checked_sub(source_line_start)?;
+    let start = output_line_start.checked_add(prefix)?;
+
+    (start <= output_line_end
+        && output.get(output_line_start..start) == source.get(source_line_start..source_start))
+    .then_some(start)
 }
 
 /// Where the injected helper preamble goes, and how long it is.
@@ -165,6 +265,8 @@ struct Builder<'a> {
     output: &'a str,
     resolver: &'a Resolver,
     map: &'a mut SourceMap,
+    source_lines: &'a LineIndex,
+    output_lines: &'a LineIndex,
     /// Output offset reached so far. Monotone: the compiler emits in source
     /// order, so nothing is ever located behind it.
     cursor: usize,
@@ -218,7 +320,10 @@ impl Builder<'_> {
     ///
     /// Anchors like `Size = ` and `__luaux_read(` exist only in the output, so
     /// they carry no run — their value is that they put the cursor exactly on
-    /// the verbatim text that follows.
+    /// the verbatim text that follows. That is worth more than it looks: an
+    /// anchored expression is matched by [`Builder::verbatim`]'s `starts_with`
+    /// fast path, so it is never searched for, and neither ambiguity nor
+    /// [`MIN_SEARCH`] can refuse it.
     fn anchor(&mut self, needle: &str) -> bool {
         let Some(window) = self.output.get(self.cursor..self.limit) else {
             return false;
@@ -231,6 +336,105 @@ impl Builder<'_> {
         true
     }
 
+    /// The output range the source text at `source_start` can possibly occupy.
+    ///
+    /// Lines are preserved, and the backend puts every entry on the line its
+    /// attribute or child was written on, so a run cannot leave the lines its
+    /// source spans. Narrowing to those lines before a search is what makes a
+    /// repeated expression locatable: three sibling `{Row}` spreads are three
+    /// lines with one occurrence each, where the region as a whole has three.
+    ///
+    /// If that placement is ever violated the text is simply not found in the
+    /// window, so the cost is coverage — never a run on the wrong bytes.
+    fn window(&self, source_start: usize, length: usize) -> Option<(usize, usize)> {
+        let first = self.source_lines.line_of(source_start);
+        let last = self.source_lines.line_of(source_start + length.saturating_sub(1));
+
+        let (line_start, _) = self.output_lines.line_range(self.output, first);
+        let (_, line_end) = self.output_lines.line_range(self.output, last);
+
+        let from = self.cursor.max(line_start);
+        let to = self.limit.min(line_end);
+
+        (from <= to && to <= self.output.len()).then_some((from, to))
+    }
+
+    /// Like [`Builder::anchor`], but never looking past the line the entry sits
+    /// on.
+    ///
+    /// An unbounded anchor can jump into a *nested* element's output — every
+    /// element with a spread emits `__luaux_merge(` — carrying the cursor past
+    /// everything in between and losing all of it. The generated text an entry
+    /// follows is always on, or before, that entry's own line, so the window
+    /// runs from the cursor to the end of it.
+    fn anchor_before(&mut self, needle: &str, source_start: usize) -> bool {
+        let line = self.source_lines.line_of(source_start);
+        let (_, line_end) = self.output_lines.line_range(self.output, line);
+
+        let to = self.limit.min(line_end);
+        let Some(window) = self.output.get(self.cursor..to) else { return false };
+        let Some(at) = window.find(needle) else { return false };
+
+        self.cursor += at + needle.len();
+        true
+    }
+
+    /// Steps onto `text`, if only generated punctuation separates the cursor
+    /// from it.
+    ///
+    /// A spread and an expression child are pushed verbatim with nothing of
+    /// their own in front — no `Key = ` to anchor on — so what precedes them is
+    /// the punctuation closing the previous entry and opening this one, plus
+    /// whatever whitespace the line-preserving writer used. Stepping over
+    /// exactly that is a *local* move: unlike a search it cannot land in another
+    /// element's output, and landing here is what puts [`Builder::verbatim`] on
+    /// its `starts_with` path, which no length floor or repeat can refuse.
+    ///
+    /// Guided by `text` rather than blind, because an expression may itself
+    /// begin with a brace — `{ {1, 2} }` — and skipping into it would step past
+    /// the very byte being placed.
+    fn skip_to(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+
+        // Bounded only by the region, deliberately. Stepping cannot cross *our*
+        // occurrence to reach a later one: the loop stops the moment the text is
+        // under the cursor, so the first reachable occurrence is always the
+        // earliest, and anything that is not punctuation stops the walk before
+        // it gets there.
+        //
+        // The looser bound is needed because an entry does not always land on
+        // the line it was written on — a spread closes the prop table, and the
+        // attributes after it are emitted on the closing tag's line, several
+        // blank lines further down.
+        let end = self.limit.min(self.output.len());
+
+        while self.cursor < end {
+            let Some(rest) = self.output.get(self.cursor..end) else { return };
+            if rest.starts_with(text) {
+                return;
+            }
+
+            let Some(next) = rest.chars().next() else { return };
+            if !next.is_whitespace() && !matches!(next, ',' | '(' | ')' | '{' | '}') {
+                return;
+            }
+
+            self.cursor += next.len_utf8();
+        }
+    }
+
+    /// Records that something could not be placed.
+    ///
+    /// A failure must not take its siblings with it: the cursor stays where the
+    /// walk expects it, but the count is what turns a silent gap into a logged
+    /// one. Every caller of this has already decided to record nothing.
+    fn lose(&mut self) -> bool {
+        self.map.note_lost();
+        false
+    }
+
     /// Records `length` source bytes as a run, wherever they landed.
     ///
     /// Sitting at the cursor is the ordinary case and needs no search at all.
@@ -239,30 +443,51 @@ impl Builder<'_> {
     /// because picking between two is guessing.
     fn verbatim(&mut self, source_start: usize, length: usize) -> bool {
         let Some(text) = self.source.get(source_start..source_start + length) else {
-            return false;
+            return self.lose();
         };
         if text.is_empty() {
             return false;
         }
 
-        let Some(window) = self.output.get(self.cursor..self.limit) else {
-            return false;
-        };
+        // Sitting on it already: no search, so nothing about the rest of the
+        // file can refuse this. Anchoring exists to reach this branch.
+        if self.output.get(self.cursor..self.limit).is_some_and(|rest| rest.starts_with(text)) {
+            return self.record(source_start, self.cursor, length);
+        }
 
-        let at = if window.starts_with(text) {
-            0
-        } else if text.len() >= MIN_SEARCH {
-            match window.find(text) {
-                Some(at) if !window[at + 1..].contains(text) => at,
-                _ => return false,
-            }
-        } else {
-            return false;
-        };
+        if text.len() < MIN_SEARCH {
+            // Too short to search for safely: `x` occurs inside
+            // `create("TextBox")`. Anchoring is the only way to place these, so
+            // reaching here means an unanchored path, not a lost cause.
+            return self.lose();
+        }
 
-        let output = self.cursor + at;
-        if !self.map.push(self.source, self.output, Run { source: source_start, output, length }) {
-            return false;
+        // The line it was written on first, where a repeated expression has only
+        // one occurrence to choose from.
+        if let Some(at) = self
+            .window(source_start, length)
+            .and_then(|(from, to)| Some((from, unique_match(self.output.get(from..to)?, text)?)))
+        {
+            return self.record(source_start, at.0 + at.1, length);
+        }
+
+        // Then the region. The backend does not keep *every* entry on its own
+        // line: a spread closes the prop table, and the named attributes after
+        // it are emitted on the closing tag's line. Refusing those would trade
+        // one gap for another, and uniqueness still stands between a match and a
+        // guess.
+        let Some(rest) = self.output.get(self.cursor..self.limit) else { return self.lose() };
+
+        match unique_match(rest, text) {
+            Some(at) => self.record(source_start, self.cursor + at, length),
+            None => self.lose(),
+        }
+    }
+
+    /// Pushes a located run, and moves the cursor past it.
+    fn record(&mut self, source: usize, output: usize, length: usize) -> bool {
+        if !self.map.push(self.source, self.output, Run { source, output, length }) {
+            return self.lose();
         }
 
         self.cursor = output + length;
@@ -288,26 +513,27 @@ impl Builder<'_> {
         }
 
         let needle = format!("{name}(");
-        let Some(window) = self.output.get(self.cursor..self.limit) else { return false };
 
-        let at = if window.starts_with(&needle) {
-            0
-        } else {
-            match window.find(&needle) {
-                Some(at) if !window[at + 1..].contains(&needle) => at,
-                _ => return false,
-            }
-        };
-
-        let output = self.cursor + at;
-        let run = Run { source: source_start, output, length: name.len() };
-
-        if !self.map.push(self.source, self.output, run) {
-            return false;
+        if self.output.get(self.cursor..self.limit).is_some_and(|rest| rest.starts_with(&needle)) {
+            return self.record(source_start, self.cursor, name.len());
         }
 
-        self.cursor = output + name.len();
-        true
+        // Bounded to the tag's own line first, so a component used twice is not
+        // ambiguous with itself; then the region, for the same reason
+        // [`Builder::verbatim`] falls back.
+        if let Some(at) = self
+            .window(source_start, name.len())
+            .and_then(|(from, to)| Some((from, unique_match(self.output.get(from..to)?, &needle)?)))
+        {
+            return self.record(source_start, at.0 + at.1, name.len());
+        }
+
+        let Some(rest) = self.output.get(self.cursor..self.limit) else { return self.lose() };
+
+        match unique_match(rest, &needle) {
+            Some(at) => self.record(source_start, self.cursor + at, name.len()),
+            None => self.lose(),
+        }
     }
 
     /// Steps over `Key = `, recording the key itself when the author wrote it.
@@ -324,17 +550,35 @@ impl Builder<'_> {
     fn attribute_key(&mut self, written: &str, canonical: &str, source_start: usize) -> bool {
         let anchor = format!("{canonical} = ");
 
-        let Some(window) = self.output.get(self.cursor..self.limit) else { return false };
-        let Some(at) = window.find(&anchor) else { return false };
+        // The line it was written on first, then the region — the same two
+        // stages as everything else here, and for the same reason: a spread
+        // closes the prop table, so attributes after one are emitted on the
+        // closing tag's line rather than their own.
+        //
+        // The *first* match in each, not the unique one. Two siblings on a line
+        // legitimately both emit `Name = `, and the cursor is what tells them
+        // apart — it is already past the earlier element's. Requiring uniqueness
+        // refuses both, which is a real shape and a real loss.
+        let found = self
+            .window(source_start, written.len())
+            .and_then(|(from, to)| Some(from + self.output.get(from..to)?.find(&anchor)?))
+            .or_else(|| {
+                let rest = self.output.get(self.cursor..self.limit)?;
+                Some(self.cursor + rest.find(&anchor)?)
+            });
 
-        let output = self.cursor + at;
+        let Some(output) = found else { return self.lose() };
 
-        if written == canonical {
-            self.map.push(
+        // Only when the author's spelling survived into the output: an alias
+        // renames it, and there is then no shared text to record.
+        if written == canonical
+            && !self.map.push(
                 self.source,
                 self.output,
                 Run { source: source_start, output, length: written.len() },
-            );
+            )
+        {
+            self.lose();
         }
 
         self.cursor = output + anchor.len();
@@ -377,6 +621,28 @@ impl Builder<'_> {
             let written = element.name.as_written();
             let (start, _) = crate::tree::open_name(self.source, element.span.start, &written);
             self.component_name(start, &written);
+        } else if let Some(class) = &intrinsic {
+            // Step onto this element's own output before anything inside it is
+            // placed. A component's name did that above; an intrinsic emits no
+            // text of the author's, so it needs an anchor of its own.
+            //
+            // Deliberately the *whole* call — `create("Frame")(` — and not the
+            // `({` that follows. `({` is ordinary Luau: any call taking a table
+            // has one, so a child's own expression can contain the anchor being
+            // searched for, which walks the cursor past the child and lets the
+            // search adopt a later occurrence of the same text. This needle
+            // cannot occur before the element it belongs to.
+            let open = format!("{}(\"{class}\")(", self.resolver.create());
+            self.anchor_before(&open, element.span.start);
+        }
+
+        // The merge call wraps every group, so it is anchored once for the
+        // element rather than once per spread: after the first, the next
+        // `__luaux_merge(` in the output belongs to a *sibling*, and stepping
+        // onto that carries the cursor out of this element entirely.
+        if element.attributes.iter().any(|a| matches!(a, Attribute::Spread { .. })) {
+            let open = format!("{}(", luaux::imports::MERGE_HELPER);
+            self.anchor_before(&open, element.span.start);
         }
 
         // Unresolved elements get no text plan, exactly as in the backend: with
@@ -400,29 +666,31 @@ impl Builder<'_> {
                         continue;
                     }
 
+                    // An attribute the class does not have is *recovered* by the
+                    // backend, which emits it under the name as written — so it
+                    // is in the output, and refusing to map it would take the
+                    // expression beside it away at exactly the moment the author
+                    // is fixing the name.
                     let key = match (&intrinsic, resolved) {
-                        (Some(class), true) => {
-                            match self.resolver.resolve_attribute(class, name, span.start) {
-                                Ok(key) => key,
-                                Err(_) => continue,
-                            }
-                        }
+                        (Some(class), true) => self
+                            .resolver
+                            .resolve_attribute(class, name, span.start)
+                            .unwrap_or_else(|_| name.clone()),
                         _ => name.clone(),
                     };
 
                     match value {
+                        // The key failing does not cost the value: they are
+                        // separate positions, and the value is the one carrying
+                        // a type.
                         AttributeValue::Expression(_) => {
-                            if !self.attribute_key(name, &key, span.start) {
-                                continue;
-                            }
+                            self.attribute_key(name, &key, span.start);
                             if let Some((start, end)) = braced(self.source, span.start) {
                                 self.expression(start, end);
                             }
                         }
                         AttributeValue::StringLiteral(literal) => {
-                            if !self.attribute_key(name, &key, span.start) {
-                                continue;
-                            }
+                            self.attribute_key(name, &key, span.start);
                             // The span ends just past the closing quote, and the
                             // literal is stored with its quotes.
                             let start = span.end.saturating_sub(literal.len());
@@ -479,6 +747,10 @@ impl Builder<'_> {
         for child in children {
             match child {
                 Child::Node(node) => self.node(node),
+                // A child is a bare entry in the element's table, reached by
+                // stepping over punctuation from wherever the previous entry
+                // ended. The element's own opening was anchored before any of
+                // this, so there is nothing further to search for.
                 Child::Expression { span, .. } if !plan.consumes_expressions => {
                     if let Some((start, end)) = braced(self.source, span.start) {
                         self.expression(start, end);
@@ -494,6 +766,12 @@ impl Builder<'_> {
     fn expression(&mut self, start: usize, end: usize) {
         let Some(text) = self.source.get(start..end) else { return };
         let nested = regions::regions(text);
+
+        // Step onto it if only generated punctuation is in the way. Guided by
+        // the leading verbatim stretch, which is the whole expression unless
+        // LuauX is nested in it.
+        let lead = nested.first().map_or(text.len(), |region| region.start);
+        self.skip_to(&text[..lead]);
 
         if nested.is_empty() {
             self.verbatim(start, end - start);
@@ -621,6 +899,181 @@ mod tests {
         output.get(to..to + needle.len())
     }
 
+    /// Compiles the way the server does: recovering from resolution errors, so
+    /// a file with an attribute the class does not have still produces output —
+    /// which is the case the map has to keep working through.
+    fn recovered(source: &str) -> (String, SourceMap) {
+        let config = Config::with_create("create");
+        let compiled = luaux::compile::compile_recovering(source, &Vide, config.clone())
+            .unwrap_or_else(|error| panic!("compile {source:?}: {error}"));
+        let map = build(source, &compiled.output, &config);
+        (compiled.output, map)
+    }
+
+    /// Every occurrence of `needle` maps, and lands on the same text.
+    ///
+    /// Every, not the first: a duplicated expression is exactly the case where
+    /// checking one occurrence proves nothing about the others, and it is how
+    /// three separate defects went unnoticed.
+    fn every_occurrence_maps(source: &str, output: &str, map: &SourceMap, needle: &str) -> usize {
+        let mut at = 0;
+        let mut seen = 0;
+
+        while let Some(found) = source[at..].find(needle) {
+            let start = at + found;
+
+            let Some(to) = map.to_output(start) else {
+                panic!(
+                    "occurrence {seen} of {needle:?} at {start} did not map\n\
+                     --- source ---\n{source}\n--- output ---\n{output}"
+                )
+            };
+
+            assert_eq!(
+                output.get(to..to + needle.len()),
+                Some(needle),
+                "occurrence {seen} of {needle:?} at {start} landed on other text\n\
+                 --- source ---\n{source}\n--- output ---\n{output}"
+            );
+
+            // The text matching proves nothing on its own — every occurrence of
+            // a repeated expression has the same text, so landing on the *wrong*
+            // one passes that check. Coming back is what distinguishes them.
+            assert_eq!(
+                map.to_source(to),
+                Some(start),
+                "occurrence {seen} of {needle:?} at {start} mapped to {to}, which \
+                 belongs to a different occurrence\n\
+                 --- source ---\n{source}\n--- output ---\n{output}"
+            );
+
+            seen += 1;
+            at = start + needle.len();
+        }
+
+        seen
+    }
+
+    /// The shapes a position map has to cover, and what must map in each.
+    ///
+    /// Crossed deliberately: expression kind × unique and duplicated × short and
+    /// long × one line and several × nesting depth. Each row that is only a
+    /// small variation of another is there because the variation is what broke.
+    const CORPUS: &[(&str, &[&str])] = &[
+        // Attribute values: the anchored path, including duplicates and a name
+        // too short to search for.
+        ("local create = f()\nlocal e = <Frame Size={size}/>\n", &["size"]),
+        ("local create = f()\nlocal Card = f()\nlocal e = <Card A={x} B={x}/>\n", &["x"]),
+        ("local create = f()\nlocal Card = f()\nlocal e = <Card A={q}/>\n", &["q"]),
+        (
+            "local create = f()\nlocal e = (\n  <Frame\n    Size={size}\n    Name={name}\n  />\n)\n",
+            &["size", "name"],
+        ),
+        // Spreads: the path that had no anchor at all.
+        ("local create = f()\nlocal Card = f()\nlocal e = <Card {props}/>\n", &["props"]),
+        ("local create = f()\nlocal Card = f()\nlocal e = <Card {p}/>\n", &["p"]),
+        (
+            "local create = f()\nlocal Card = f()\nlocal e = (\n  <Frame>\n    <Card {row}/>\n    <Card {row}/>\n    <Card {row}/>\n  </Frame>\n)\n",
+            &["row"],
+        ),
+        ("local create = f()\nlocal Card = f()\nlocal e = <Card {row} {row}/>\n", &["row"]),
+        ("local create = f()\nlocal Card = f()\nlocal e = <Card {row} {col}/>\n", &["row", "col"]),
+        (
+            "local create = f()\nlocal Card = f()\nlocal e = <Card A={one} {row} B={two}/>\n",
+            &["one", "row", "two"],
+        ),
+        (
+            "local create = f()\nlocal Card = f()\nlocal e = (\n  <Card\n    {row}\n    Name={name}\n  />\n)\n",
+            &["row", "name"],
+        ),
+        // Expression children: the other path that had no anchor.
+        ("local create = f()\nlocal e = <Frame>{child}</Frame>\n", &["child"]),
+        ("local create = f()\nlocal e = <Frame>{c}</Frame>\n", &["c"]),
+        (
+            "local create = f()\nlocal e = (\n  <Frame>\n    {child}\n    {child}\n  </Frame>\n)\n",
+            &["child"],
+        ),
+        // Interpolation, single and repeated.
+        ("local create = f()\nlocal e = <TextLabel>Hi {name}</TextLabel>\n", &["name"]),
+        // Needles avoid letters that also occur in literal text: text between
+        // tags is folded into a `Text = ` string and deliberately not mapped, so
+        // hovering it cannot ask luau-lsp about the inside of a string literal.
+        ("local create = f()\nlocal e = <TextLabel>{count} and {count}</TextLabel>\n", &["count"]),
+        // Nesting.
+        (
+            "local create = f()\nlocal e = <Frame>{cond and <TextLabel Size={inner}/> or nil}</Frame>\n",
+            &["cond", "inner"],
+        ),
+        (
+            "local create = f()\nlocal e = (\n  <Frame>\n    <Frame>\n      <TextLabel Size={deep}/>\n    </Frame>\n  </Frame>\n)\n",
+            &["deep"],
+        ),
+        // Recovery: an attribute the class does not have is emitted as written,
+        // so the value beside it is in the output and has to map.
+        ("local create = f()\nlocal e = <Frame Colour={shade}/>\n", &["shade"]),
+        // A duplicated child with a call — and so a `(` and a `{` — between the
+        // two. Anchoring on punctuation that also occurs *inside* an expression
+        // is how a run lands on the wrong occurrence.
+        (
+            "local create = f()\nlocal Row = f()\nlocal e = <Frame>{head}{gap}{Row({ pad = 1 })}{gap}</Frame>\n",
+            &["head", "gap", "Row({ pad = 1 })"],
+        ),
+        // The same, in a fragment, which emits a bare table and so has no `({`
+        // of its own anywhere.
+        (
+            "local create = f()\nlocal Row = f()\nlocal e = <>{head}{gap}{Row({ pad = 1 })}{gap}</>\n",
+            &["head", "gap"],
+        ),
+        // Two regions on one line, each with spreads: the second element's
+        // merge call is a tempting anchor for the first element's spread.
+        (
+            "local create = f()\nlocal Card = f()\nlocal Row = f()\nlocal x, y = <Card {abc} {abc}/>, <Row {abc}/>\n",
+            &["abc"],
+        ),
+        // Named attributes and spreads alternating over several lines. The
+        // compiler closes and reopens the prop table around each spread, which
+        // moves later attributes off the line they were written on — so this is
+        // the shape that tests whether the line bound is too tight.
+        (
+            "local create = f()\nlocal Card = f()\nlocal e = (\n  <Card\n    Name={nn}\n    {aa}\n    Size={ss}\n    {bb}\n  />\n)\n",
+            &["nn", "aa", "ss", "bb"],
+        ),
+        // Children on their own lines, where stepping over a newline could land
+        // on the next entry instead of this one.
+        (
+            "local create = f()\nlocal Wrap = f()\nlocal e = (\n  <Frame>\n    {gee()}\n    {Wrap({})}\n    {Wrap({})}\n  </Frame>\n)\n",
+            &["gee()"],
+        ),
+    ];
+
+    /// Nothing in the corpus fails to be placed.
+    ///
+    /// `lost` is the builder's own count of constructs it refused. Zero across
+    /// every shape is the property this file exists to hold, and it is checked
+    /// alongside the positions themselves because the two catch different
+    /// mistakes: a refusal is counted, a path never walked at all is not.
+    #[test]
+    fn the_corpus_has_no_gaps() {
+        for (source, needles) in CORPUS {
+            let (output, map) = recovered(source);
+
+            assert_eq!(
+                map.lost(),
+                0,
+                "{} construct(s) unplaced\n--- source ---\n{source}\n--- output ---\n{output}",
+                map.lost()
+            );
+            assert_eq!(map.abandoned(), None, "coverage abandoned for {source:?}");
+
+            for needle in *needles {
+                let seen = every_occurrence_maps(source, &output, &map, needle);
+                assert!(seen > 0, "{needle:?} never appears in {source:?}");
+            }
+
+            assert_round_trips(source, &output, &map);
+        }
+    }
+
     const FIXTURES: &[&str] = &[
         "local create = f()\nlocal e = <Frame/>\n",
         "local create = f()\nlocal e = <Frame Size={size} Name='a' Visible />\n",
@@ -633,6 +1086,58 @@ mod tests {
         "local create = f()\nlocal e = (\n  <TextButton\n    Activated={function()\n      count(count() + 1)\n    end}\n  />\n)\n",
         "--!strict\nlocal create = f()\nlocal p = {}\nlocal e = <Frame {p} Name={n} />\n",
     ];
+
+    /// Searching must not slice through a `char`.
+    ///
+    /// The uniqueness check looked one *byte* past a match, which is not a
+    /// character boundary when the match starts with a multi-byte one — and an
+    /// identifier can. The panic was caught upstream, so the symptom was every
+    /// Luau request on the file failing rather than a dead server.
+    #[test]
+    fn a_multi_byte_expression_does_not_panic() {
+        for source in [
+            "local create = f()\nlocal Row = f()\nlocal e = <Frame>{héad}{Row({ pad = 1 })}{héad}</Frame>\n",
+            "local create = f()\nlocal e = <Frame Size={ünicode}/>\n",
+            "local create = f()\nlocal e = <TextLabel>Hi {émoji} 😀</TextLabel>\n",
+        ] {
+            let (output, map) = recovered(source);
+            assert_round_trips(source, &output, &map);
+        }
+    }
+
+    /// `Key = ` occurs inside emitted strings too.
+    ///
+    /// A text child reading `Name = z` becomes exactly that in the output, so
+    /// taking the first match would put the attribute's own run inside a string
+    /// literal — a position on bytes the author wrote somewhere else entirely.
+    #[test]
+    fn an_attribute_key_is_not_matched_inside_a_string() {
+        let source =
+            "local create = f()\nlocal e = <Frame Size={<TextLabel>Name = z</TextLabel>} Name={q}/>\n";
+        let (output, map) = recovered(source);
+
+        assert_round_trips(source, &output, &map);
+
+        // Whatever `Name` maps to, it is not the one inside the emitted text.
+        let written = source.rfind("Name").expect("the attribute");
+        if let Some(to) = map.to_output(written) {
+            assert_eq!(map.to_source(to), Some(written), "{output}");
+        }
+    }
+
+    /// Losing the whole file has to be *said*, not just done.
+    ///
+    /// A compiler that stops preserving lines empties the map, which takes every
+    /// luau-lsp answer in the file with it. That happened, and the only symptom
+    /// was silence — so the reason is recorded where a caller can report it.
+    #[test]
+    fn abandoning_the_file_is_recorded() {
+        let source = "local create = f()\nlocal e = <Frame/>\nlocal after = 1\n";
+        let map = build(source, "local create = f()\n", &Config::with_create("create"));
+
+        assert!(map.is_empty(), "{:?}", map.runs());
+        assert!(map.abandoned().is_some(), "the reason was not recorded");
+    }
 
     #[test]
     fn every_run_round_trips() {
