@@ -184,7 +184,7 @@ dependencies = [
 
 [[package]]
 name = "luaux-lsp"
-version = "0.1.2-canary.1"
+version = "0.1.2-canary.2"
 dependencies = [
  "luaux",
  "serde",
