@@ -100,6 +100,58 @@ fn a_plain_value_in_interpolated_text_is_not_a_type_error() {
     }
 }
 
+/// A spread shared by sibling elements answers on every one of them.
+///
+/// Sharing one props table across siblings is the ordinary way to write this.
+/// The spread was the only captured expression with no generated text in front
+/// of it to anchor on, so it fell back to searching the region — which refuses
+/// any match that occurs again later. Every sibling but the last was silent.
+#[test]
+fn a_spread_repeated_across_siblings_answers_on_each() {
+    let mut server = server!();
+    server.open(
+        "local create = nil :: any\n\
+         local row = { Size = 1 }\n\
+         local e = (\n\
+         \t<Frame>\n\
+         \t\t<TextButton {row} />\n\
+         \t\t<TextButton {row} />\n\
+         \t\t<TextButton {row} />\n\
+         \t</Frame>\n\
+         )\n",
+    );
+    let _ = theirs(&mut server);
+
+    // `row` starts at character 15 on each of lines 4, 5 and 6.
+    for line in 4..=6 {
+        let hover = server.request("textDocument/hover", server.at(line, 15));
+        let text = hover["contents"]["value"].as_str().unwrap_or_default();
+
+        assert!(text.contains("Size"), "line {line} did not answer: {hover:#?}");
+    }
+}
+
+/// A one-character expression answers.
+///
+/// Anything under `MIN_SEARCH` bytes could not be searched for at all, so on the
+/// unanchored paths it was unmappable however unique it was — and `i`, `n` and
+/// `x` are ordinary names.
+#[test]
+fn a_short_spread_answers() {
+    let mut server = server!();
+    server.open(
+        "local create = nil :: any\n\
+         local p = { Size = 1 }\n\
+         local e = <TextButton {p} />\n",
+    );
+    let _ = theirs(&mut server);
+
+    let hover = server.request("textDocument/hover", server.at(2, 23));
+    let text = hover["contents"]["value"].as_str().unwrap_or_default();
+
+    assert!(text.contains("Size"), "{hover:#?}");
+}
+
 #[test]
 fn luau_type_errors_come_back_on_the_luaux_line() {
     let mut server = server!();
