@@ -290,6 +290,24 @@ jobs:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
         shell: bash
         run: |
+          # The Marketplace has no prerelease channel in the semver sense: vsce
+          # refuses any version carrying a `-suffix` outright, before it reaches
+          # the API. Its own pre-release support wants a plain `x.y.z` marked at
+          # *package* time, which would mean a canary spending a version number
+          # that could then never be released as stable.
+          #
+          # So a canary ships as a Release asset and on OpenVSX, both of which
+          # take the version as written. The one channel that cannot describe
+          # what this build is does not receive it.
+          version=$(node -p "require('./package.json').version")
+
+          case "$version" in
+            *-*)
+              echo "::notice::$version is a prerelease — skipping the Marketplace"
+              exit 0
+              ;;
+          esac
+
           if [ -z "${VSCE_PAT:-}" ]; then
             echo "::notice::VSCE_PAT is not set — skipping the Marketplace"
             exit 0

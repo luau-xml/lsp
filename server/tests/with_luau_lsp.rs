@@ -54,6 +54,104 @@ fn theirs(server: &mut Server) -> Vec<Value> {
         .collect()
 }
 
+/// Interpolating something that is not a source is not a type error.
+///
+/// `{count}` in text is compiled into a call to the generated `__luaux_read`,
+/// and a bad signature on that helper blames the *author* for writing an
+/// ordinary value: a number, a string, a table. Every generated helper is a type
+/// the user never wrote and cannot fix, so its signature is this repository's
+/// problem even though it is emitted by the compiler.
+///
+/// Asserting an absence needs a positive signal first, or the test passes while
+/// luau-lsp is still starting and has said nothing at all. The annotation on
+/// line 2 is a type error we know arrives; once it has, the file has been
+/// analysed and the silence on line 3 means something.
+///
+/// The signal has to be a *type* error specifically. `bad` is also unused, so
+/// line 2 carries a lint as well — and a lint arrives even when type checking
+/// has stopped running, which is exactly the regression that would make this
+/// test pass while proving nothing.
+#[test]
+fn a_plain_value_in_interpolated_text_is_not_a_type_error() {
+    let mut server = server!();
+    server.open(
+        "local create = nil :: any\n\
+         local n = 30\n\
+         local bad: string = 1\n\
+         local e = <TextLabel>Ammo {n}</TextLabel>\n\
+         return e\n",
+    );
+
+    let diagnostics = theirs(&mut server);
+
+    let seeded = diagnostics.iter().any(|diagnostic| {
+        diagnostic["range"]["start"]["line"] == json!(2)
+            && diagnostic["message"].as_str().is_some_and(|message| message.contains("TypeError"))
+    });
+    assert!(seeded, "the seeded type error never arrived: {diagnostics:#?}");
+
+    // Line 3 is the interpolation, and there is nothing wrong with it.
+    for diagnostic in &diagnostics {
+        assert_ne!(
+            diagnostic["range"]["start"]["line"],
+            json!(3),
+            "a plain value in interpolated text was blamed: {diagnostic:#?}"
+        );
+    }
+}
+
+/// A spread shared by sibling elements answers on every one of them.
+///
+/// Sharing one props table across siblings is the ordinary way to write this.
+/// The spread was the only captured expression with no generated text in front
+/// of it to anchor on, so it fell back to searching the region — which refuses
+/// any match that occurs again later. Every sibling but the last was silent.
+#[test]
+fn a_spread_repeated_across_siblings_answers_on_each() {
+    let mut server = server!();
+    server.open(
+        "local create = nil :: any\n\
+         local row = { Size = 1 }\n\
+         local e = (\n\
+         \t<Frame>\n\
+         \t\t<TextButton {row} />\n\
+         \t\t<TextButton {row} />\n\
+         \t\t<TextButton {row} />\n\
+         \t</Frame>\n\
+         )\n",
+    );
+    let _ = theirs(&mut server);
+
+    // `row` starts at character 15 on each of lines 4, 5 and 6.
+    for line in 4..=6 {
+        let hover = server.request("textDocument/hover", server.at(line, 15));
+        let text = hover["contents"]["value"].as_str().unwrap_or_default();
+
+        assert!(text.contains("Size"), "line {line} did not answer: {hover:#?}");
+    }
+}
+
+/// A one-character expression answers.
+///
+/// Anything under `MIN_SEARCH` bytes could not be searched for at all, so on the
+/// unanchored paths it was unmappable however unique it was — and `i`, `n` and
+/// `x` are ordinary names.
+#[test]
+fn a_short_spread_answers() {
+    let mut server = server!();
+    server.open(
+        "local create = nil :: any\n\
+         local p = { Size = 1 }\n\
+         local e = <TextButton {p} />\n",
+    );
+    let _ = theirs(&mut server);
+
+    let hover = server.request("textDocument/hover", server.at(2, 23));
+    let text = hover["contents"]["value"].as_str().unwrap_or_default();
+
+    assert!(text.contains("Size"), "{hover:#?}");
+}
+
 #[test]
 fn luau_type_errors_come_back_on_the_luaux_line() {
     let mut server = server!();

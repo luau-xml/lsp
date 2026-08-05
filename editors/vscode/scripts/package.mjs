@@ -13,6 +13,12 @@
 // The bundled binary is checked before packaging: when building for the host —
 // the ordinary case — one that will not start here will not start there either,
 // and finding that out now is free.
+//
+// A version carrying a prerelease suffix is packaged with `--pre-release`, which
+// records it in the manifest. It has to happen *here*: `vsce publish` refuses the
+// flag on a `.vsix` that was not built with it, and `ovsx publish` ignores the
+// flag outright for a prepackaged one. Unmarked, a canary reaches OpenVSX looking
+// like an ordinary release and is offered to everyone who never asked for it.
 
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -76,4 +82,15 @@ if (!fs.existsSync(vsce)) {
   process.exit(1);
 }
 
-execFileSync(process.execPath, [vsce, "package", "--target", target], { stdio: "inherit" });
+// A `-suffix` is the only thing that distinguishes a canary from a release: the
+// same rule the workflow uses to decide the Marketplace cannot have it.
+const { version } = JSON.parse(fs.readFileSync(path.join(here, "..", "package.json"), "utf8"));
+const preRelease = version.includes("-");
+
+console.log(`packaging ${version} for ${target}${preRelease ? " as a pre-release" : ""}`);
+
+const flags = preRelease ? ["--pre-release"] : [];
+
+execFileSync(process.execPath, [vsce, "package", "--target", target, ...flags], {
+  stdio: "inherit",
+});
