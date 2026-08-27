@@ -121,3 +121,11 @@ jobs:
 
       - run: npm run compile
         working-directory: editors/vscode
+
+      # The Studio plugin listener, over real sockets. Here rather than in the
+      # grammar job because it drives the *compiled* `out/plugin.js`, and this
+      # is the job that compiles. It needs no dependencies of its own — the
+      # module imports nothing but `node:http`, which is the point of it not
+      # importing `vscode`.
+      - run: node test/plugin.mjs
+        working-directory: editors/vscode

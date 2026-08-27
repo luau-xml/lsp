@@ -81,6 +81,7 @@ project's own spelling:
 - Its type errors, merged with ours and mapped back onto the `.luaux`
 - Types across `require`, including one `.luaux` requiring another, on a
   project that has never been built
+- Instance types from the Roblox Studio plugin, if you use it
 
 Highlighting works with no server at all. That is deliberate: the grammar is the
 zero-latency fallback for whenever the server is starting, crashed or absent, and
@@ -154,6 +155,9 @@ Every setting is optional.
 | `luaux.server.path`     | Path to `luaux-lsp`. Empty searches `PATH`, then rokit's tool storage, then the bundled copy.           |
 | `luaux.luauLsp.path`    | Path to `luau-lsp`. Empty searches the same places. Without one, LuauX answers nothing that needed Luau types. |
 | `luaux.autoClosingTags` | Close a tag as you finish opening it: typing `<Frame>` puts `</Frame>` after the cursor. Default `true`. |
+| `luaux.plugin.enabled`  | Listen for the Roblox Studio plugin, for DataModel types without a rojo sourcemap. Default `true`.      |
+| `luaux.plugin.port`     | Port to listen on. Default `3667`, which is where the Studio plugin posts.                              |
+| `luaux.plugin.forwardTo`| Re-post every DataModel to a second plugin server on this port, so the luau-lsp extension gets it too.  |
 | `luaux.trace.server`    | Log traffic between the editor and the LuauX server. `off`, `messages`, or `verbose`.                  |
 
 `LuauX: Restart Server` restarts it from the command palette.
@@ -214,6 +218,23 @@ The effect is that a fresh clone has working types before it has a `build/`
 directory, and editing a file nobody has open still updates every file that
 requires it.
 
+### The Roblox Studio plugin
+
+luau-lsp's companion Studio plugin sends the DataModel over a local HTTP port,
+and it is the *editor extension* that listens, not the server binary — so
+proxying settings and definitions is not enough to receive it. This extension
+holds the same port (`3667`) and speaks the same wire format, so an unmodified
+Studio plugin works against it with nothing reconfigured.
+
+Only one process can hold a port. The luau-lsp extension ships its own plugin
+server **off** by default, so this is usually free; if you have switched it on,
+move one of the two and set `luaux.plugin.forwardTo` to the other, which
+re-posts every DataModel so both extensions get it.
+
+This is what gives `game.ReplicatedStorage.Thing` a type in a project with no
+rojo sourcemap. It is not what makes requires work — the tree carries
+instances, not file paths.
+
 ## Layout
 
 ```
@@ -251,7 +272,7 @@ cd editors/vscode && npm install && npm run compile
 
 ```sh
 cargo test                              # 285 tests
-cd editors/vscode/test && npm test      # 51 grammar tokenization checks
+cd editors/vscode && npm test           # 51 grammar + 30 plugin checks
 ```
 
 The tests that need a real luau-lsp find one on `PATH` or in rokit's tool
@@ -271,7 +292,8 @@ Two invariants are worth naming, because everything else leans on them:
 Early, but real. 285 tests run across Linux, macOS and Windows, of which 31 drive
 the proxy against a genuine luau-lsp, because a proxy nothing ever proxies
 through is not a tested proxy. The grammar is asserted against the real TextMate
-engine, so its checks fail on a regression rather than on a reviewer noticing.
+engine, and the Studio plugin listener over real sockets, so their checks fail on
+a regression rather than on a reviewer noticing.
 
 Expect the protocol surface to be stable and the tooling to keep moving.
 

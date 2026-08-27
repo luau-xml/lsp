@@ -318,6 +318,13 @@ impl Server {
                 self.send_child(&build::notification(method, params));
             }
 
+            // The Roblox Studio plugin's DataModel, relayed by the extension.
+            // Ours to pass on, not to interpret: it is how `game.Workspace.X`
+            // gets a type in a project that has no rojo sourcemap.
+            "$/plugin/full" | "$/plugin/clear" => {
+                self.send_child(&build::notification(method, params));
+            }
+
             "$/setTrace" => {
                 self.trace = params.get("value").and_then(Value::as_str) != Some("off");
             }

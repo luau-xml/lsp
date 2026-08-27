@@ -65,6 +65,29 @@
           "default": true,
           "markdownDescription": "Close a tag as you finish opening it: typing `<Frame>` puts `</Frame>` after the cursor."
         },
+        "luaux.plugin.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Listen for the [luau-lsp Roblox Studio plugin](https://create.roblox.com/store/asset/10913122509), which sends the DataModel so `game.ReplicatedStorage.Thing` has a type without a rojo sourcemap. Nothing happens until the plugin is installed and sending."
+        },
+        "luaux.plugin.port": {
+          "type": "number",
+          "default": 3667,
+          "markdownDescription": "Port to listen on for the Studio plugin. The same default the plugin posts to. Only one process can hold it: if the luau-lsp extension has `#luau-lsp.plugin.enabled#` on, move one of the two and use `#luaux.plugin.forwardTo#`."
+        },
+        "luaux.plugin.forwardTo": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "default": null,
+          "markdownDescription": "Re-post every DataModel to a second plugin server on this port, so the luau-lsp extension keeps receiving it too. The Studio plugin can only be pointed at one port, so whichever extension holds it forwards to the other."
+        },
+        "luaux.plugin.maximumRequestBodySize": {
+          "type": "string",
+          "default": "3mb",
+          "markdownDescription": "Largest DataModel to accept from the Studio plugin. A large place file can exceed this, and the plugin is told when it does."
+        },
         "luaux.trace.server": {
           "type": "string",
           "enum": [
@@ -103,7 +126,7 @@
     "compile": "tsc -p .",
     "watch": "tsc -watch -p .",
     "package": "node scripts/package.mjs",
-    "test": "cd test && npm test"
+    "test": "npm run compile && node test/spec.mjs && node test/plugin.mjs"
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"
