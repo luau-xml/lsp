@@ -147,12 +147,14 @@ and passes them to the child, so definition files and FFlags are configured once
 
 Every setting is optional.
 
-| Setting                 | Description                                                                                            |
-| ----------------------- | ------------------------------------------------------------------------------------------------------ |
-| `luaux.server.path`     | Path to `luaux-lsp`. Empty searches `PATH`, then rokit's tool storage, then the bundled copy.           |
-| `luaux.luauLsp.path`    | Path to `luau-lsp`. Empty searches the same places. Without one, LuauX answers nothing that needed Luau types. |
-| `luaux.autoClosingTags` | Close a tag as you finish opening it: typing `<Frame>` puts `</Frame>` after the cursor. Default `true`. |
-| `luaux.trace.server`    | Log traffic between the editor and the LuauX server. `off`, `messages`, or `verbose`.                  |
+| Setting                    | Description                                                                                            |
+| -------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `luaux.server.path`        | Path to `luaux-lsp`. Empty searches `PATH`, then rokit's tool storage, then the bundled copy.           |
+| `luaux.luauLsp.path`       | Path to `luau-lsp`. Empty searches the same places. Without one, LuauX answers nothing that needed Luau types. |
+| `luaux.autoClosingTags`    | Close a tag as you finish opening it: typing `<Frame>` puts `</Frame>` after the cursor. Default `true`. |
+| `luaux.completion.enabled` | Offer completions. Turn it off to leave them to another language server; every other feature keeps working. Default `true`. |
+| `luaux.hover.enabled`      | Answer hovers. Turn it off to leave them to another language server; every other feature keeps working. Default `true`. |
+| `luaux.trace.server`       | Log traffic between the editor and the LuauX server. `off`, `messages`, or `verbose`.                  |
 
 `LuauX: Restart Server` restarts it from the command palette.
 
