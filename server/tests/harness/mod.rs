@@ -33,6 +33,9 @@ pub struct Server {
     /// Further `luau-lsp.*` settings the editor answers with, merged over the
     /// server path. Set before [`Server::initialized`].
     pub settings: Value,
+    /// The `luaux.*` settings the editor answers with, as the second section of
+    /// the configuration request. Set before [`Server::initialized`].
+    pub luaux: Value,
 }
 
 impl Server {
@@ -95,6 +98,7 @@ impl Server {
             _directory: directory,
             luau_lsp,
             settings: json!({}),
+            luaux: json!({}),
         }
     }
 
@@ -172,7 +176,10 @@ impl Server {
         }
 
         let id = request["id"].clone();
-        self.send(&json!({ "jsonrpc": "2.0", "id": id, "result": [settings] }));
+        // Both sections, in the order they were asked for: `luau-lsp` then
+        // `luaux`.
+        let ours = self.luaux.clone();
+        self.send(&json!({ "jsonrpc": "2.0", "id": id, "result": [settings, ours] }));
     }
 
     pub fn open(&mut self, text: &str) {

@@ -582,6 +582,14 @@ impl Server {
         self.start_child();
     }
 
+    /// Whether `luaux.completion.enabled` is off.
+    ///
+    /// Absent means on, the way `luau-lsp.fflags.enableByDefault` is read. A
+    /// setting the editor has not answered yet must not switch a feature off.
+    fn completion_disabled(&self) -> bool {
+        self.ours_settings.pointer("/completion/enabled") == Some(&Value::Bool(false))
+    }
+
     fn start_child(&mut self) {
         // Ours wins: someone who named a binary in `luaux.luauLsp.path` meant
         // that one, whatever the luau-lsp extension is configured to use.
@@ -1077,6 +1085,14 @@ impl Server {
     // --- features ----------------------------------------------------------
 
     fn completion(&mut self, id: Value, params: Value) {
+        // Switched off, so that another server on `.luaux` answers instead of
+        // both of us. Refused here rather than by withholding the capability:
+        // settings arrive after `initialize`, and a gate on the request takes a
+        // change of mind at once, where a capability would need a restart.
+        if self.completion_disabled() {
+            return self.reply(id, Value::Null);
+        }
+
         let Some((uri, offset)) = self.locate(&params) else {
             return self.reply(id, Value::Null);
         };
