@@ -48,6 +48,24 @@ impl Project {
         }
     }
 
+    /// A project with no `luaux.toml`, carrying `config`.
+    ///
+    /// For tests, whose fixtures are written for one arrangement and have to say
+    /// which. [`Project::discover`] on a path with no config gives
+    /// `Config::default()`, and since luaux 0.2.0 that is **React's** — bare
+    /// `create` fixtures compiled through it fail with "`React` is not in
+    /// scope", which says nothing about what the test was checking.
+    ///
+    /// Deliberately not a change to [`Project::bare`]: the compiler's own
+    /// no-config fallback is `Config::default()` too, so a server that quietly
+    /// used a different one would disagree with the build about every file in a
+    /// project that has no `luaux.toml` — the exact mismatch this repository
+    /// exists to avoid.
+    #[cfg(test)]
+    pub fn without_config(config: Config) -> Self {
+        Self { config, ..Self::bare(PathBuf::from("/nonexistent-luaux-project")) }
+    }
+
     /// Walks up from `file` looking for `luaux.toml`, as the CLI does, so the
     /// config can sit at the project root while sources live under `src/`.
     pub fn discover(file: &Path) -> Self {

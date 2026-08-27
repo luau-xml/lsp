@@ -241,12 +241,27 @@ fn preamble(
 ) -> Option<(usize, usize)> {
     let bound = resolver.bound();
 
+    // Listed field by field rather than closed with `..Default::default()`.
+    // Only `merge_props` and `read` inline a statement, and the length of those
+    // statements is the only thing being measured here — the rest gate
+    // `[factory]` in-scope checks, which would turn a missing import into an
+    // `Err` and cost the map for a file that compiled perfectly well.
+    //
+    // So the others are `false` deliberately, and spelled out: if a later luaux
+    // gains a helper that *does* inject text, this stops compiling and someone
+    // reads this comment. Absorbing it silently would shift every position after
+    // the preamble by the length of a statement nobody accounted for.
     let helpers = Helpers {
-        create: false,
         merge_props: output.contains(&format!("local function {}(", luaux::imports::MERGE_HELPER))
             && !bound.contains(luaux::imports::MERGE_HELPER),
         read: output.contains(&format!("local function {}(", luaux::imports::READ_HELPER))
             && !bound.contains(luaux::imports::READ_HELPER),
+        create: false,
+        children: false,
+        event: false,
+        compute: false,
+        fragment: false,
+        merge: false,
     };
 
     if !helpers.merge_props && !helpers.read {
@@ -659,6 +674,21 @@ impl Builder<'_> {
                         self.expression(start, end);
                     }
                 }
+                // `={props.Text}`, where the property name is *inferred* from
+                // the expression. The expression is captured verbatim like any
+                // other, so it maps exactly as one.
+                //
+                // The key deliberately does not. `Text` really is in the source
+                // — at the tail of `props.Text` — but it sits *after* the point
+                // the generated `Text = ` occupies, and a run recorded there
+                // would go backwards against the expression's own run and be
+                // refused, or worse, take the expression's place. A key nobody
+                // typed as a key is not a position worth inventing.
+                Attribute::Inferred { span, .. } => {
+                    if let Some((start, end)) = braced(self.source, span.start) {
+                        self.expression(start, end);
+                    }
+                }
                 Attribute::Named { name, value, span } => {
                     // Rule 5: text between the tags replaces a `Text` attribute,
                     // so the attribute is never emitted.
@@ -853,13 +883,14 @@ impl TextPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use luaux::backend::Vide;
+    use crate::backend;
 
     /// Compiles like the CLI does, then maps the pair.
     fn compiled(source: &str) -> (String, SourceMap, Config) {
         let config = Config::with_create("create");
-        let (output, _) = luaux::compile::compile_configured(source, &Vide, config.clone())
-            .unwrap_or_else(|error| panic!("compile {source:?}: {error}"));
+        let (output, _) =
+            luaux::compile::compile_configured(source, backend(&config), config.clone())
+                .unwrap_or_else(|error| panic!("compile {source:?}: {error}"));
         let map = build(source, &output, &config);
         (output, map, config)
     }
@@ -904,7 +935,7 @@ mod tests {
     /// which is the case the map has to keep working through.
     fn recovered(source: &str) -> (String, SourceMap) {
         let config = Config::with_create("create");
-        let compiled = luaux::compile::compile_recovering(source, &Vide, config.clone())
+        let compiled = luaux::compile::compile_recovering(source, backend(&config), config.clone())
             .unwrap_or_else(|error| panic!("compile {source:?}: {error}"));
         let map = build(source, &compiled.output, &config);
         (compiled.output, map)
@@ -1317,10 +1348,11 @@ end
         // never wrote.
         let source = "local create = f()\nlocal e = <Frame bgColor={c}/>\n";
         let config =
-            Config::parse("[factory]\ncreate = \"create\"\n\n[properties.Frame]\nBackgroundColor3 = \"bgColor\"\n")
+            Config::parse("[factory]\nbackend = \"table\"\ncreate = \"create\"\n\n[properties.Frame]\nBackgroundColor3 = \"bgColor\"\n")
                 .expect("config");
         let (output, _) =
-            luaux::compile::compile_configured(source, &Vide, config.clone()).expect("compile");
+            luaux::compile::compile_configured(source, backend(&config), config.clone())
+                .expect("compile");
         let map = build(source, &output, &config);
 
         assert_round_trips(source, &output, &map);

@@ -1616,7 +1616,7 @@ mod tests {
     /// position inside the *other* one's call.
     #[test]
     fn a_stale_map_does_not_offer_one_components_props_as_anothers() {
-        use luaux::backend::Vide;
+        use crate::backend;
         use luaux::config::Config;
 
         let good =
@@ -1625,7 +1625,8 @@ mod tests {
 
         let config = Config::with_create("create");
         let (output, _) =
-            luaux::compile::compile_configured(good, &Vide, config.clone()).expect("compile");
+            luaux::compile::compile_configured(good, backend(&config), config.clone())
+                .expect("compile");
         let map = crate::map_builder::build(good, &output, &config);
 
         // Unchanged, so the run still describes it: the feature keeps working

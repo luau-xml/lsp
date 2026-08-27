@@ -174,6 +174,20 @@ counterpart. Positions there map to nothing, and callers drop them rather than
 snapping to the nearest run. A wrong position sends people to code they did not
 write.
 
+Which shape that generated text takes is the project's choice, not ours. Since
+luaux 0.2.0 `[factory] backend` selects an arrangement — `table` for Vide,
+Fusion and Fluid (`F(class)(props)`), `element` for React
+(`F(class, props, children)`) — and the server compiles through whichever one
+your `luaux.toml` names. Compiling with the other is not a near miss: the call
+has a different shape, so the map's anchors miss and the file loses every
+forwarded position.
+
+One consequence worth knowing when upgrading: a `luaux.toml` with a `[factory]`
+block must now name a backend. Without one the compiler rejects the config, and
+the server reports that rejection as a diagnostic rather than quietly falling
+back to a default — because a default would be a guess about which library you
+are using, and being wrong about that is worse than saying so.
+
 luau-lsp is handed `build/App.luau`, **the path the build already writes**. So
 `require` resolves, the rojo sourcemap lines up, `.luaurc` aliases apply, and
 definition files apply. As far as it is concerned, this is the file it would

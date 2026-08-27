@@ -54,8 +54,14 @@ impl Server {
         let root = directory.path.clone();
 
         std::fs::create_dir_all(root.join("src")).expect("src");
-        std::fs::write(root.join("luaux.toml"), "[build]\nin = \"src\"\nout = \"build\"\n")
-            .expect("luaux.toml");
+        // The `[factory]` block names an arrangement because since luaux 0.2.0
+        // it has to, and `table` is the one these fixtures are written for:
+        // they bind a bare `create` and expect `create("Frame")({ … })`.
+        std::fs::write(
+            root.join("luaux.toml"),
+            "[build]\nin = \"src\"\nout = \"build\"\n\n[factory]\nbackend = \"table\"\ncreate = \"create\"\n",
+        )
+        .expect("luaux.toml");
         std::fs::create_dir_all(root.join("build")).expect("build");
         // Strict mode, so luau-lsp reports the type errors these tests are about
         // rather than shrugging at them.
