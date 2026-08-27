@@ -26,6 +26,7 @@ pub mod server;
 pub mod sourcemap;
 pub mod symbols;
 pub mod tree;
+pub mod workspace;
 
 /// The code generator a project's `[factory] backend` selects.
 ///

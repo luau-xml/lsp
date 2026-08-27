@@ -49,8 +49,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     documentSelector: [{ scheme: "file", language: "luaux" }],
     // `.luaux` only. The luau-lsp extension keeps `.luau`, and the two coexist
     // because neither claims the other's files.
+    //
+    // Both patterns matter to the server and for different reasons.
+    // `luaux.toml` decides what compiles at all. Every `.luaux` matters because
+    // the server compiles the ones nobody opened — that is what gives a require
+    // of one its types — and a file created, deleted or rewritten outside the
+    // editor (a branch switch, most often) changes what that require resolves
+    // to with no `didChange` to announce it.
     synchronize: {
-      fileEvents: vscode.workspace.createFileSystemWatcher("**/luaux.toml"),
+      fileEvents: [
+        vscode.workspace.createFileSystemWatcher("**/luaux.toml"),
+        vscode.workspace.createFileSystemWatcher("**/*.luaux"),
+      ],
     },
     outputChannel: output,
     traceOutputChannel:

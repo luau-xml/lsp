@@ -79,6 +79,8 @@ project's own spelling:
 
 - Hover, completion, definition, references, signature help, inlay hints
 - Its type errors, merged with ours and mapped back onto the `.luaux`
+- Types across `require`, including one `.luaux` requiring another, on a
+  project that has never been built
 
 Highlighting works with no server at all. That is deliberate: the grammar is the
 zero-latency fallback for whenever the server is starting, crashed or absent, and
@@ -193,6 +195,25 @@ luau-lsp is handed `build/App.luau`, **the path the build already writes**. So
 definition files apply. As far as it is concerned, this is the file it would
 have analysed anyway.
 
+### Requiring one `.luaux` from another
+
+That last part takes one more step, because luau-lsp answers a `require` from
+two different places: it checks **the filesystem** for whether the module
+exists, and takes **the open document** for what is in it. A `.luaux` that has
+never been built is therefore `Unknown require` no matter how good the Luau
+handed over is, and one that *has* been built is typed from the last build
+rather than from the file as it is now.
+
+So the server compiles **every** `.luaux` in the project, not only the ones you
+have open, and hands them all over. Where nothing exists at the build path yet
+it writes the compiled output there — and **only** where nothing exists, so
+`luaux build` and its `--watch` always win and this never races them over the
+project's own output.
+
+The effect is that a fresh clone has working types before it has a `build/`
+directory, and editing a file nobody has open still updates every file that
+requires it.
+
 ## Layout
 
 ```
@@ -229,7 +250,7 @@ cd editors/vscode && npm install && npm run compile
 ## Testing
 
 ```sh
-cargo test                              # 267 tests
+cargo test                              # 285 tests
 cd editors/vscode/test && npm test      # 51 grammar tokenization checks
 ```
 
@@ -247,7 +268,7 @@ Two invariants are worth naming, because everything else leans on them:
 
 ## Status
 
-Early, but real. 267 tests run across Linux, macOS and Windows, of which 23 drive
+Early, but real. 285 tests run across Linux, macOS and Windows, of which 31 drive
 the proxy against a genuine luau-lsp, because a proxy nothing ever proxies
 through is not a tested proxy. The grammar is asserted against the real TextMate
 engine, so its checks fail on a regression rather than on a reviewer noticing.

@@ -834,3 +834,239 @@ local e = <Frame Size={n + \"x\"}/>
         "no type error on line 4: {theirs:#?}"
     );
 }
+
+// --- requiring one `.luaux` from another -----------------------------------
+//
+// The case the proxy could not answer until the workspace scan existed.
+// luau-lsp resolves a require in two steps from two different sources:
+// *existence* is checked on the filesystem, *content* comes from the open
+// document. So a `.luaux` that has never been built is `Unknown require`
+// however good the text we hand over, and one that has been built is typed
+// from the last build rather than from the file as it is now.
+//
+// `crate::workspace` closes both halves. These tests are what say so, because
+// neither half is observable from unit tests: only a real luau-lsp decides
+// whether a require resolved.
+
+/// A dependency that is genuinely LuauX — it has to be compiled before it is
+/// Luau at all — exporting one field with a type worth getting wrong.
+const CARD: &str = "\
+--!strict
+local create = nil :: any
+local element = <Frame/>
+return { element = element, title = \"Card\" }
+";
+
+/// Requires it and assigns its `string` field to a `number`.
+const APP: &str = "\
+--!strict
+local create = nil :: any
+local Card = require(\"./Card\")
+local n: number = Card.title
+local e = <Frame Size={n}/>
+";
+
+/// A started server with extra `.luaux` files already on disk, as a window
+/// opened on an existing project would find them.
+macro_rules! server_with {
+    ($($name:expr => $text:expr),* $(,)?) => {{
+        match harness::find_luau_lsp() {
+            Some(path) => {
+                let mut server = Server::with_luau_lsp(Some(path));
+                $(
+                    std::fs::write(server.root().join("src").join($name), $text)
+                        .expect("write dependency");
+                )*
+                server.initialize();
+                server.initialized();
+                server
+            }
+            None => {
+                eprintln!(
+                    "skipped: no working luau-lsp found. Set LUAU_LSP=<path> to run this test."
+                );
+                return;
+            }
+        }
+    }};
+}
+
+/// The headline: a `.luaux` requiring a `.luaux` **that has never been built**
+/// still gets its types.
+///
+/// Before the workspace scan this was `TypeError: Unknown require`, because
+/// nothing had ever written `build/Card.luau` and luau-lsp checks the
+/// filesystem for existence. The assertion is deliberately on the *specific*
+/// error — assigning `string` to `number` — rather than "some error", because
+/// `Unknown require` is also an error and would pass a weaker test.
+#[test]
+fn a_luaux_requiring_an_unbuilt_luaux_gets_its_types() {
+    let mut server = server_with!("Card.luaux" => CARD);
+    server.open(APP);
+
+    let messages = complaints(&mut server);
+
+    assert!(
+        messages.iter().any(|message| message.contains("number") && message.contains("string")),
+        "no type error from the required .luaux: {messages:#?}"
+    );
+    assert!(
+        !messages.iter().any(|message| message.contains("Unknown require")),
+        "the require did not resolve: {messages:#?}"
+    );
+}
+
+/// And the build output it needed is written where the build would write it.
+///
+/// The write is the whole reason the require resolves, so it is asserted
+/// directly rather than inferred from the types working.
+#[test]
+fn the_missing_build_output_is_written_for_it() {
+    let mut server = server_with!("Card.luaux" => CARD);
+    server.open(APP);
+    let _ = complaints(&mut server);
+
+    let built = server.root().join("build").join("Card.luau");
+    assert!(built.is_file(), "{} was never written", built.display());
+
+    let text = std::fs::read_to_string(&built).expect("read");
+    assert!(text.contains("title"), "{text}");
+    // Compiled, not copied: the markup is gone by the time it is on disk.
+    assert!(!text.contains("<Frame"), "the .luaux was written through uncompiled: {text}");
+}
+
+/// A dependency the editor never opened, edited on disk — a branch switch is
+/// the ordinary case — is recompiled and re-typed.
+///
+/// This is the half that makes the answers *current* rather than merely
+/// present. Without it the types come from whatever was last written to
+/// `build/`, which is exactly the stale answer the design refuses elsewhere.
+#[test]
+fn editing_an_unopened_dependency_on_disk_updates_the_types() {
+    let mut server = server_with!("Card.luaux" => CARD);
+    server.open(APP);
+
+    // The mismatch is there to begin with.
+    let messages = complaints(&mut server);
+    assert!(
+        messages.iter().any(|message| message.contains("number") && message.contains("string")),
+        "{messages:#?}"
+    );
+
+    // `title` becomes a number, which makes the assignment in App legal.
+    let card = server.root().join("src").join("Card.luaux");
+    std::fs::write(&card, CARD.replace("\"Card\"", "1")).expect("rewrite dependency");
+
+    server.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({ "changes": [{ "uri": harness::uri_for(&card), "type": 2 }] }),
+    );
+
+    // Nudge the open file so a fresh round of diagnostics is published.
+    server.change(APP);
+
+    for _ in 0..20 {
+        let messages = complaints(&mut server);
+        if !messages.iter().any(|m| m.contains("number") && m.contains("string")) {
+            return;
+        }
+    }
+
+    panic!("the type error survived an edit to the dependency it came from");
+}
+
+/// A `.luaux` that has been built already must not have its output replaced.
+///
+/// `luaux build --watch` owns these paths, and a language server racing the
+/// build over the project's own output is not a trade worth making. The
+/// content luau-lsp type-checks arrives over LSP regardless, so there is
+/// nothing to gain by writing.
+#[test]
+fn an_existing_build_output_is_left_alone() {
+    let mut server = server_with!("Card.luaux" => CARD);
+
+    let built = server.root().join("build").join("Card.luau");
+    std::fs::create_dir_all(built.parent().expect("parent")).expect("build directory");
+    std::fs::write(&built, "-- written by luaux build\n").expect("existing output");
+
+    server.open(APP);
+    let _ = complaints(&mut server);
+
+    assert_eq!(
+        std::fs::read_to_string(&built).expect("read"),
+        "-- written by luaux build\n",
+        "the server overwrote the build's own output"
+    );
+}
+
+/// The Roblox form of the same question: `require(script.Parent.Card)`.
+///
+/// Kept separate from the string-require test because it resolves by a
+/// completely different route — the rojo sourcemap maps an *instance* to a file
+/// path, and only then is the file read. Both routes end at the same existence
+/// check, which is what `crate::workspace` satisfies, but a test of one is not a
+/// test of the other.
+#[test]
+fn a_roblox_instance_require_of_a_luaux_gets_its_types() {
+    let mut server = match harness::find_luau_lsp() {
+        Some(path) => Server::with_luau_lsp(Some(path)),
+        None => {
+            eprintln!("skipped: no working luau-lsp found. Set LUAU_LSP=<path> to run this test.");
+            return;
+        }
+    };
+
+    std::fs::write(server.root().join("src").join("Card.luaux"), CARD).expect("dependency");
+
+    // What rojo would generate for a project syncing `build/`. Both modules are
+    // siblings under ReplicatedStorage, so `script.Parent.Card` names one from
+    // the other.
+    std::fs::write(
+        server.root().join("sourcemap.json"),
+        json!({
+            "name": "Game",
+            "className": "DataModel",
+            "children": [{
+                "name": "ReplicatedStorage",
+                "className": "ReplicatedStorage",
+                "children": [
+                    { "name": "App", "className": "ModuleScript",
+                      "filePaths": ["build/App.luau"] },
+                    { "name": "Card", "className": "ModuleScript",
+                      "filePaths": ["build/Card.luau"] },
+                ],
+            }],
+        })
+        .to_string(),
+    )
+    .expect("sourcemap");
+
+    server.settings = json!({
+        "platform": { "type": "roblox" },
+        "sourcemap": { "enabled": true, "autogenerate": false },
+    });
+
+    server.initialize();
+    server.initialized();
+
+    server.open(
+        "\
+--!strict
+local create = nil :: any
+local Card = require(script.Parent.Card)
+local n: number = Card.title
+local e = <Frame Size={n}/>
+",
+    );
+
+    let messages = complaints(&mut server);
+
+    assert!(
+        messages.iter().any(|message| message.contains("number") && message.contains("string")),
+        "no type error through the sourcemap: {messages:#?}"
+    );
+    assert!(
+        !messages.iter().any(|message| message.contains("Unknown require")),
+        "the instance require did not resolve: {messages:#?}"
+    );
+}

@@ -330,6 +330,12 @@ impl Server {
 /// last part is the whole point on Windows, where `file://{path}` yields
 /// `file://C:\a\b`, which is not a URI any editor sends and which the server
 /// rightly refuses to turn into a path.
+/// The `file://` URI for any path, for tests that name a file the harness does
+/// not own — a dependency beside `App.luaux`, say.
+pub fn uri_for(path: &Path) -> String {
+    uri_of(path)
+}
+
 fn uri_of(path: &Path) -> String {
     let text = path.to_string_lossy().replace('\\', "/");
     let mut out = String::from("file://");
