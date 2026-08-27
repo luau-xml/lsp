@@ -590,6 +590,12 @@ impl Server {
         self.ours_settings.pointer("/completion/enabled") == Some(&Value::Bool(false))
     }
 
+    /// Whether `luaux.hover.enabled` is off. Read the way
+    /// [`Server::completion_disabled`] is.
+    fn hover_disabled(&self) -> bool {
+        self.ours_settings.pointer("/hover/enabled") == Some(&Value::Bool(false))
+    }
+
     fn start_child(&mut self) {
         // Ours wins: someone who named a binary in `luaux.luauLsp.path` meant
         // that one, whatever the luau-lsp extension is configured to use.
@@ -1259,6 +1265,13 @@ impl Server {
     }
 
     fn hover(&mut self, id: Value, params: Value) {
+        // Switched off, so that another server on `.luaux` answers instead of
+        // both of us. Gated on the request rather than on the capability, for
+        // the reason `completion` gives.
+        if self.hover_disabled() {
+            return self.reply(id, Value::Null);
+        }
+
         let Some((uri, offset)) = self.locate(&params) else {
             return self.reply(id, Value::Null);
         };
