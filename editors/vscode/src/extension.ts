@@ -16,6 +16,7 @@ import {
   ServerOptions,
   TransportKind,
 } from "vscode-languageclient/node";
+import { bytes, startPluginServer } from "./plugin";
 
 const run = promisify(execFile);
 
@@ -49,8 +50,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     documentSelector: [{ scheme: "file", language: "luaux" }],
     // `.luaux` only. The luau-lsp extension keeps `.luau`, and the two coexist
     // because neither claims the other's files.
+    //
+    // Both patterns matter to the server and for different reasons.
+    // `luaux.toml` decides what compiles at all. Every `.luaux` matters because
+    // the server compiles the ones nobody opened — that is what gives a require
+    // of one its types — and a file created, deleted or rewritten outside the
+    // editor (a branch switch, most often) changes what that require resolves
+    // to with no `didChange` to announce it.
     synchronize: {
-      fileEvents: vscode.workspace.createFileSystemWatcher("**/luaux.toml"),
+      fileEvents: [
+        vscode.workspace.createFileSystemWatcher("**/luaux.toml"),
+        vscode.workspace.createFileSystemWatcher("**/*.luaux"),
+      ],
     },
     outputChannel: output,
     traceOutputChannel:
@@ -72,7 +83,37 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       vscode.window.showInformationMessage("LuauX server restarted.");
     }),
     autoCloseTags(client),
+    // The Studio plugin's DataModel, which is how `game.ReplicatedStorage.X`
+    // gets a type without a rojo sourcemap. Never fatal: a port that will not
+    // bind costs instance types and nothing else.
+    pluginServer(client, output),
   );
+}
+
+/// The editor's half of the Studio plugin listener: settings in, notifications
+/// out. Everything with a rule in it is in `plugin.ts`, which does not import
+/// `vscode` and so can be tested without one.
+function pluginServer(client: LanguageClient, output: vscode.OutputChannel): vscode.Disposable {
+  const settings = () => vscode.workspace.getConfiguration("luaux.plugin");
+
+  if (!settings().get<boolean>("enabled", true)) {
+    return new vscode.Disposable(() => {});
+  }
+
+  const server = startPluginServer({
+    port: settings().get<number>("port", 3667),
+    limit: bytes(settings().get<string>("maximumRequestBodySize", "3mb")),
+    // Read on every use, so moving the downstream port does not need a reload.
+    forwardTo: () => settings().get<number | null>("forwardTo", null),
+    notify: (method, params) => void client.sendNotification(method, params),
+    listFiles: async () => {
+      const files = await vscode.workspace.findFiles("**/*.{lua,luau,luaux}");
+      return files.map((file) => file.fsPath);
+    },
+    log: (message) => output.appendLine(message),
+  });
+
+  return new vscode.Disposable(() => server.close());
 }
 
 /// Closes a tag as you finish opening it: type `<Frame>` and `</Frame>` appears

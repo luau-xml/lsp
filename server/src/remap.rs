@@ -212,7 +212,6 @@ mod tests {
     use crate::map_builder;
     use crate::project::Project;
     use serde_json::json;
-    use std::path::Path;
 
     struct Fixture {
         source: String,
@@ -223,10 +222,13 @@ mod tests {
     }
 
     fn fixture(source: &str) -> Fixture {
-        let project = Project::discover(Path::new("/nonexistent-luaux-project/a.luaux"));
-        let (output, _) =
-            luaux::compile::compile_configured(source, &luaux::Vide, project.config.clone())
-                .expect("compile");
+        let project = Project::without_config(luaux::Config::with_create("create"));
+        let (output, _) = luaux::compile::compile_configured(
+            source,
+            crate::backend(&project.config),
+            project.config.clone(),
+        )
+        .expect("compile");
         let map = map_builder::build(source, &output, &project.config);
 
         Fixture {

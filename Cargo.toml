@@ -3,7 +3,7 @@ members = ["server"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/luau-xml/lsp"
@@ -25,4 +25,4 @@ repository = "https://github.com/luau-xml/lsp"
 # Exact, for the reason above this: `^0.1.1` would let a patch release of the
 # compiler drift under a server that was never built against it, which is the one
 # thing this file and LUAUX_PIN exist to prevent. Bumping it is deliberate work.
-luaux = { path = "../luaux/crates/luaux", version = "=0.1.3" }
+luaux = { path = "../luaux/crates/luaux", version = "=0.2.0" }

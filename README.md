@@ -79,6 +79,9 @@ project's own spelling:
 
 - Hover, completion, definition, references, signature help, inlay hints
 - Its type errors, merged with ours and mapped back onto the `.luaux`
+- Types across `require`, including one `.luaux` requiring another, on a
+  project that has never been built
+- Instance types from the Roblox Studio plugin, if you use it
 
 Highlighting works with no server at all. That is deliberate: the grammar is the
 zero-latency fallback for whenever the server is starting, crashed or absent, and
@@ -110,7 +113,7 @@ $ codium --install-extension RyanCundiff.luaux-lsp
    is for exactly one platform. Take the one matching yours:
 
 ```console
-$ code --install-extension luaux-lsp-win32-x64-0.1.1.vsix
+$ code --install-extension luaux-lsp-win32-x64-0.2.0.vsix
 ```
 
 4. **From source**, which needs the compiler as a sibling checkout (see
@@ -152,6 +155,9 @@ Every setting is optional.
 | `luaux.server.path`     | Path to `luaux-lsp`. Empty searches `PATH`, then rokit's tool storage, then the bundled copy.           |
 | `luaux.luauLsp.path`    | Path to `luau-lsp`. Empty searches the same places. Without one, LuauX answers nothing that needed Luau types. |
 | `luaux.autoClosingTags` | Close a tag as you finish opening it: typing `<Frame>` puts `</Frame>` after the cursor. Default `true`. |
+| `luaux.plugin.enabled`  | Listen for the Roblox Studio plugin, for DataModel types without a rojo sourcemap. Default `true`.      |
+| `luaux.plugin.port`     | Port to listen on. Default `3667`, which is where the Studio plugin posts.                              |
+| `luaux.plugin.forwardTo`| Re-post every DataModel to a second plugin server on this port, so the luau-lsp extension gets it too.  |
 | `luaux.trace.server`    | Log traffic between the editor and the LuauX server. `off`, `messages`, or `verbose`.                  |
 
 `LuauX: Restart Server` restarts it from the command palette.
@@ -174,10 +180,60 @@ counterpart. Positions there map to nothing, and callers drop them rather than
 snapping to the nearest run. A wrong position sends people to code they did not
 write.
 
+Which shape that generated text takes is the project's choice, not ours. Since
+luaux 0.2.0 `[factory] backend` selects an arrangement — `table` for Vide,
+Fusion and Fluid (`F(class)(props)`), `element` for React
+(`F(class, props, children)`) — and the server compiles through whichever one
+your `luaux.toml` names. Compiling with the other is not a near miss: the call
+has a different shape, so the map's anchors miss and the file loses every
+forwarded position.
+
+One consequence worth knowing when upgrading: a `luaux.toml` with a `[factory]`
+block must now name a backend. Without one the compiler rejects the config, and
+the server reports that rejection as a diagnostic rather than quietly falling
+back to a default — because a default would be a guess about which library you
+are using, and being wrong about that is worse than saying so.
+
 luau-lsp is handed `build/App.luau`, **the path the build already writes**. So
 `require` resolves, the rojo sourcemap lines up, `.luaurc` aliases apply, and
 definition files apply. As far as it is concerned, this is the file it would
 have analysed anyway.
+
+### Requiring one `.luaux` from another
+
+That last part takes one more step, because luau-lsp answers a `require` from
+two different places: it checks **the filesystem** for whether the module
+exists, and takes **the open document** for what is in it. A `.luaux` that has
+never been built is therefore `Unknown require` no matter how good the Luau
+handed over is, and one that *has* been built is typed from the last build
+rather than from the file as it is now.
+
+So the server compiles **every** `.luaux` in the project, not only the ones you
+have open, and hands them all over. Where nothing exists at the build path yet
+it writes the compiled output there — and **only** where nothing exists, so
+`luaux build` and its `--watch` always win and this never races them over the
+project's own output.
+
+The effect is that a fresh clone has working types before it has a `build/`
+directory, and editing a file nobody has open still updates every file that
+requires it.
+
+### The Roblox Studio plugin
+
+luau-lsp's companion Studio plugin sends the DataModel over a local HTTP port,
+and it is the *editor extension* that listens, not the server binary — so
+proxying settings and definitions is not enough to receive it. This extension
+holds the same port (`3667`) and speaks the same wire format, so an unmodified
+Studio plugin works against it with nothing reconfigured.
+
+Only one process can hold a port. The luau-lsp extension ships its own plugin
+server **off** by default, so this is usually free; if you have switched it on,
+move one of the two and set `luaux.plugin.forwardTo` to the other, which
+re-posts every DataModel so both extensions get it.
+
+This is what gives `game.ReplicatedStorage.Thing` a type in a project with no
+rojo sourcemap. It is not what makes requires work — the tree carries
+instances, not file paths.
 
 ## Layout
 
@@ -215,8 +271,8 @@ cd editors/vscode && npm install && npm run compile
 ## Testing
 
 ```sh
-cargo test                              # 267 tests
-cd editors/vscode/test && npm test      # 51 grammar tokenization checks
+cargo test                              # 285 tests
+cd editors/vscode && npm test           # 51 grammar + 30 plugin checks
 ```
 
 The tests that need a real luau-lsp find one on `PATH` or in rokit's tool
@@ -233,10 +289,11 @@ Two invariants are worth naming, because everything else leans on them:
 
 ## Status
 
-Early, but real. 267 tests run across Linux, macOS and Windows, of which 23 drive
+Early, but real. 285 tests run across Linux, macOS and Windows, of which 31 drive
 the proxy against a genuine luau-lsp, because a proxy nothing ever proxies
 through is not a tested proxy. The grammar is asserted against the real TextMate
-engine, so its checks fail on a regression rather than on a reviewer noticing.
+engine, and the Studio plugin listener over real sockets, so their checks fail on
+a regression rather than on a reviewer noticing.
 
 Expect the protocol surface to be stable and the tooling to keep moving.
 

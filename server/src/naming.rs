@@ -171,7 +171,8 @@ mod tests {
     use super::*;
 
     fn config(text: &str) -> Config {
-        Config::parse(&format!("[factory]\ncreate = \"create\"\n\n{text}")).expect("config")
+        Config::parse(&format!("[factory]\nbackend = \"table\"\ncreate = \"create\"\n\n{text}"))
+            .expect("config")
     }
 
     fn written_element(config: &Config, class: &str) -> String {

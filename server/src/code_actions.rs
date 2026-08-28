@@ -74,11 +74,10 @@ mod tests {
     use crate::analysis::Analysis;
     use crate::document::Document;
     use crate::project::Project;
-    use std::path::Path;
 
     fn fixes(source: &str) -> Value {
         let document = Document::new("file:///a.luaux".into(), 1, source.into());
-        let project = Project::discover(Path::new("/nonexistent-luaux-project/a.luaux"));
+        let project = Project::without_config(luaux::Config::with_create("create"));
         let analysis = Analysis::run(&document, &project, None);
 
         actions(&document.uri, &analysis.diagnostics)

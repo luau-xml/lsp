@@ -14,7 +14,6 @@ use crate::map_builder;
 use crate::project::Project;
 use crate::scan::{self, Context};
 use crate::sourcemap::SourceMap;
-use luaux::backend::Vide;
 use luaux::roblox;
 use serde_json::{json, Value};
 
@@ -61,7 +60,11 @@ impl Analysis {
         // diagnostic, not the rest of the file's. It also keeps the generated
         // Luau, without which luau-lsp has nothing to check and every type error
         // in the file disappears along with the markup ones.
-        match luaux::compile::compile_recovering(&document.text, &Vide, project.config.clone()) {
+        match luaux::compile::compile_recovering(
+            &document.text,
+            crate::backend(&project.config),
+            project.config.clone(),
+        ) {
             Ok(compiled) => {
                 for error in &compiled.errors {
                     diagnostics.push(diagnostic(
@@ -236,11 +239,10 @@ fn suggestion(document: &Document, project: &Project, start: usize, end: usize) 
 mod tests {
     use super::*;
     use crate::project::Project;
-    use std::path::Path;
 
     fn analyse(text: &str) -> Analysis {
         let document = Document::new("file:///a.luaux".into(), 1, text.into());
-        let project = Project::discover(Path::new("/nonexistent-luaux-project/a.luaux"));
+        let project = Project::without_config(luaux::Config::with_create("create"));
         Analysis::run(&document, &project, None)
     }
 
@@ -298,9 +300,15 @@ mod tests {
             1,
             "local create = f()\nlocal e = <textLabl/>\n".into(),
         );
-        let mut project = Project::discover(Path::new("/nonexistent-luaux-project/a.luaux"));
-        project.config =
-            luaux::config::Config::parse("[elements]\nall = \"camelCase\"\n").expect("config");
+        // The casing scheme is what this test is about; the factory block is
+        // there because a config that names one has to say which arrangement it
+        // is for, and without it the file's first diagnostic is a compile error
+        // about `React` rather than the misspelt element.
+        let mut project = Project::without_config(luaux::Config::with_create("create"));
+        project.config = luaux::config::Config::parse(
+            "[factory]\nbackend = \"table\"\ncreate = \"create\"\n\n[elements]\nall = \"camelCase\"\n",
+        )
+        .expect("config");
 
         let analysis = Analysis::run(&document, &project, None);
         let data = &analysis.diagnostics[0]["data"];
@@ -339,7 +347,7 @@ mod tests {
         // them, not just the ones a fixture happens to produce.
         let text = "local e = <Frame Name='ü\u{a0}😀'/>\n";
         let document = Document::new("file:///a.luaux".into(), 1, text.into());
-        let project = Project::discover(Path::new("/nonexistent-luaux-project/a.luaux"));
+        let project = Project::without_config(luaux::Config::with_create("create"));
 
         for offset in 0..=text.len() + 4 {
             let _ = diagnostic(&document, &project, "synthetic", offset, 0, None, 1);
@@ -392,7 +400,7 @@ mod tests {
             2,
             "local create = f()\nlocal e = <Frame\n".into(),
         );
-        let project = Project::discover(Path::new("/nonexistent-luaux-project/a.luaux"));
+        let project = Project::without_config(luaux::Config::with_create("create"));
         let analysis = Analysis::run(&document, &project, Some(previous));
 
         assert!(analysis.stale);
@@ -411,7 +419,7 @@ mod tests {
             2,
             "local create = f()\n\nlocal e = <Frame\n".into(),
         );
-        let project = Project::discover(Path::new("/nonexistent-luaux-project/a.luaux"));
+        let project = Project::without_config(luaux::Config::with_create("create"));
         let analysis = Analysis::run(&document, &project, Some(previous));
 
         assert!(!analysis.stale);

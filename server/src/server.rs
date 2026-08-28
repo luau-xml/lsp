@@ -26,9 +26,11 @@ use crate::rename;
 use crate::scan;
 use crate::semantic_tokens;
 use crate::symbols;
+use crate::workspace::Workspace;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Stdout};
+use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 /// What a response from the child is for.
@@ -71,6 +73,17 @@ pub struct Server {
     /// view, not ours: a document it does not hold cannot be changed or asked
     /// about, only opened.
     opened_in_child: HashSet<String>,
+    /// Version last sent to the child, per generated URI.
+    ///
+    /// Ours rather than the editor's, and monotonic per URI. One build path can
+    /// be fed from two places — the live buffer once the editor opens the file,
+    /// and [`Workspace`] before that — and their numbering has nothing to do
+    /// with each other. Handing luau-lsp an update that appears to go backwards
+    /// invites it to discard the newer text.
+    child_versions: HashMap<String, i64>,
+    /// Every other `.luaux` in the project, compiled and handed over so that a
+    /// require of one resolves against the file as it is now.
+    workspace: Workspace,
 
     proxy: Option<Proxy>,
     pending: HashMap<i64, Pending>,
@@ -135,6 +148,8 @@ impl Server {
             stale: HashMap::new(),
             generated: HashMap::new(),
             opened_in_child: HashSet::new(),
+            child_versions: HashMap::new(),
+            workspace: Workspace::default(),
             proxy: None,
             pending: HashMap::new(),
             forwarded: HashMap::new(),
@@ -296,6 +311,17 @@ impl Server {
                 // A `luaux.toml` may have changed, and it decides what compiles.
                 self.projects.clear();
                 self.reanalyse_all();
+                // A `.luaux` may have been created, deleted or changed outside
+                // the editor — a branch switch is the ordinary case — and any of
+                // those changes what a require of it resolves to.
+                self.sync_workspace();
+                self.send_child(&build::notification(method, params));
+            }
+
+            // The Roblox Studio plugin's DataModel, relayed by the extension.
+            // Ours to pass on, not to interpret: it is how `game.Workspace.X`
+            // gets a type in a project that has no rojo sourcemap.
+            "$/plugin/full" | "$/plugin/clear" => {
                 self.send_child(&build::notification(method, params));
             }
 
@@ -670,6 +696,10 @@ impl Server {
         for uri in self.documents.uris() {
             self.sync_child(&uri);
         }
+
+        // And every `.luaux` nobody opened, without which a require of one is
+        // `Unknown require` until the project is built.
+        self.sync_workspace();
     }
 
     // --- documents ---------------------------------------------------------
@@ -734,6 +764,11 @@ impl Server {
             "textDocument/publishDiagnostics",
             json!({ "uri": uri, "diagnostics": [] }),
         ));
+
+        // Closing the editor tab does not remove the file from the project, and
+        // everything still open that requires it still needs its types. Hand it
+        // back to the workspace, which re-reads it from disk.
+        self.sync_workspace();
     }
 
     fn did_save(&mut self, params: Value) {
@@ -1016,10 +1051,9 @@ impl Server {
             return;
         }
 
-        let (Some(generated), Some(text), Some(version)) = (
+        let (Some(generated), Some(text)) = (
             self.generated_uri(uri),
             self.compiled.get(uri).map(|compiled| compiled.output.clone()),
-            self.documents.get(uri).map(|document| document.version),
         ) else {
             // No generated Luau means nothing to hand over, and luau-lsp then has
             // nothing to say about this file — which looks exactly like it having
@@ -1030,7 +1064,26 @@ impl Server {
             return;
         };
 
-        if self.opened_in_child.contains(&generated) {
+        if self.said_once.insert(format!("sent:{generated}")) {
+            self.log(3, &format!("handed {generated} to luau-lsp ({} bytes)", text.len()));
+        }
+
+        self.hand_to_child(&generated, &text);
+    }
+
+    /// Hands the child a generated document, opening it if it does not hold it.
+    ///
+    /// Which notification to send is decided by what the child actually holds,
+    /// for the reason [`Server::sync_child`] gives. The version is ours: see
+    /// [`Server::child_versions`].
+    fn hand_to_child(&mut self, generated: &str, text: &str) {
+        let version = {
+            let counter = self.child_versions.entry(generated.to_string()).or_insert(0);
+            *counter += 1;
+            *counter
+        };
+
+        if self.opened_in_child.contains(generated) {
             // Whole-text sync: an edit to one `.luaux` character can move any
             // amount of generated code, so there is no useful incremental change.
             self.send_child(&build::notification(
@@ -1043,11 +1096,7 @@ impl Server {
             return;
         }
 
-        self.opened_in_child.insert(generated.clone());
-
-        if self.said_once.insert(format!("sent:{generated}")) {
-            self.log(3, &format!("handed {generated} to luau-lsp ({} bytes)", text.len()));
-        }
+        self.opened_in_child.insert(generated.to_string());
 
         self.send_child(&build::notification(
             "textDocument/didOpen",
@@ -1060,6 +1109,107 @@ impl Server {
                 },
             }),
         ));
+    }
+
+    /// The workspace roots to walk for `.luaux`.
+    ///
+    /// The editor's own, as it reported them at `initialize`, plus the project
+    /// root of anything currently open — a file opened from outside every
+    /// folder still belongs to a project, and its siblings are still worth
+    /// compiling.
+    fn workspace_roots(&mut self) -> Vec<PathBuf> {
+        let mut roots: Vec<PathBuf> = Vec::new();
+
+        let folders = self
+            .client
+            .pointer("/workspaceFolders")
+            .and_then(Value::as_array)
+            .map(|folders| {
+                folders.iter().filter_map(|folder| folder.get("uri")?.as_str()).collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        for uri in folders
+            .into_iter()
+            .map(str::to_string)
+            .chain(self.client.get("rootUri").and_then(Value::as_str).map(str::to_string))
+        {
+            if let Some(path) = project::uri_to_path(&uri) {
+                roots.push(path);
+            }
+        }
+
+        for uri in self.documents.uris() {
+            let Some(path) = project::uri_to_path(&uri) else { continue };
+            roots.push(self.projects.for_file(&path).root);
+        }
+
+        roots.sort();
+        roots.dedup();
+        roots
+    }
+
+    /// Compiles every other `.luaux` in the project and hands it to the child.
+    ///
+    /// This is what makes a `.luaux` requiring a `.luaux` have types. luau-lsp
+    /// checks *existence* on the filesystem and takes *content* from the open
+    /// document, so both halves are needed: [`Workspace`] writes a build output
+    /// where none exists, and the compiled text travels over LSP.
+    fn sync_workspace(&mut self) {
+        if !self.child_ready {
+            return;
+        }
+
+        let open: HashSet<PathBuf> =
+            self.documents.uris().iter().filter_map(|uri| project::uri_to_path(uri)).collect();
+
+        let mut updated = 0;
+        let mut materialised = 0;
+        let mut truncated = false;
+
+        for root in self.workspace_roots() {
+            let project = self.projects.for_file(&root);
+            let changes = self.workspace.scan(&project, &open);
+
+            materialised += changes.materialised;
+            truncated |= changes.truncated;
+
+            for source in changes.updated {
+                let Some(module) = self.workspace.get(&source) else { continue };
+                let generated = project::path_to_uri(&module.build);
+                let text = module.output.clone();
+
+                self.hand_to_child(&generated, &text);
+                updated += 1;
+            }
+
+            for source in changes.removed {
+                let generated = project::path_to_uri(&project.build_path(&source));
+                self.close_in_child(&generated);
+            }
+        }
+
+        if materialised > 0 {
+            self.log(
+                3,
+                &format!(
+                    "wrote {materialised} missing build output(s) so requires resolve — \
+                     `luaux build` overwrites nothing here"
+                ),
+            );
+        }
+
+        if updated > 0 {
+            self.log(3, &format!("compiled {updated} unopened .luaux for luau-lsp"));
+        }
+
+        if truncated && self.workspace.warn_once() {
+            self.log(
+                2,
+                "this project has more .luaux files than the server indexes; \
+                 requires into the remainder resolve against the last build",
+            );
+        }
     }
 
     /// Tells the child to forget a document, by the URI it knows it under.
@@ -1616,7 +1766,7 @@ mod tests {
     /// position inside the *other* one's call.
     #[test]
     fn a_stale_map_does_not_offer_one_components_props_as_anothers() {
-        use luaux::backend::Vide;
+        use crate::backend;
         use luaux::config::Config;
 
         let good =
@@ -1625,7 +1775,8 @@ mod tests {
 
         let config = Config::with_create("create");
         let (output, _) =
-            luaux::compile::compile_configured(good, &Vide, config.clone()).expect("compile");
+            luaux::compile::compile_configured(good, backend(&config), config.clone())
+                .expect("compile");
         let map = crate::map_builder::build(good, &output, &config);
 
         // Unchanged, so the run still describes it: the feature keeps working

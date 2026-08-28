@@ -26,6 +26,29 @@ pub mod server;
 pub mod sourcemap;
 pub mod symbols;
 pub mod tree;
+pub mod workspace;
+
+/// The code generator a project's `[factory] backend` selects.
+///
+/// luaux 0.2.0 replaced the single Vide backend with two *arrangements* — which
+/// is the only thing a backend now decides — and the choice is the project's,
+/// not ours:
+///
+/// * [`Table`] — `F(class)(props)`, children in the props table. Vide, Fusion,
+///   Fluid.
+/// * [`Element`] — `F(class, props, children)`, children positional. React.
+///
+/// Every compile in this server goes through here, because compiling with the
+/// wrong arrangement is not a near miss: the generated call has a different
+/// shape, so the source map's anchors miss, and every forwarded position in the
+/// file is then either absent or — worse — pointing somewhere the author did
+/// not write.
+pub fn backend(config: &luaux::Config) -> &'static dyn luaux::Backend {
+    match config.backend {
+        luaux::config::BackendKind::Table => &luaux::backend::Table,
+        luaux::config::BackendKind::Element => &luaux::backend::Element,
+    }
+}
 
 /// Version of this server.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
