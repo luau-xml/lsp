@@ -52,6 +52,18 @@ impl Remap<'_> {
         self.value(value, true)
     }
 
+    /// Rewrites only the parts of a message that name *this* pair.
+    ///
+    /// The opposite default to [`Remap::message`], and the difference matters:
+    /// an answer about one document can carry locations in another `.luaux`, and
+    /// those are translated by running the message through a second `Remap`
+    /// built for that file. Such a pass must assume nothing — a `Hover` has no
+    /// `uri` at all, and mapping its range through a foreign file's map would
+    /// move it somewhere meaningless.
+    pub fn foreign_message(&mut self, value: &Value) -> Option<Value> {
+        self.value(value, false)
+    }
+
     fn value(&mut self, value: &Value, ours: bool) -> Option<Value> {
         match value {
             Value::Array(items) => Some(Value::Array(

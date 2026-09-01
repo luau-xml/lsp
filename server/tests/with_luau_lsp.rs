@@ -1052,6 +1052,66 @@ fn an_existing_build_output_is_left_alone() {
     );
 }
 
+const PANEL: &str = "\
+--!strict
+local create = nil :: any
+local Panel = {}
+
+function Panel.Header(props: { Title: string })
+\treturn create(\"Frame\")(props)
+end
+
+return Panel
+";
+
+/// A location in *another* `.luaux` comes home to its source.
+///
+/// `Remap` is built for one document pair and carries anything named by a
+/// different `uri` through untouched. For a hand-written `.luau` that is right;
+/// for the generated half of a `.luaux` it opens `build/Panel.luau` — code
+/// nobody wrote, at a line that corresponds to nothing. Asked as ordinary Luau
+/// rather than through a tag, because the leak is in the answer and has nothing
+/// to do with markup.
+#[test]
+fn a_definition_in_another_luaux_comes_home_to_its_source() {
+    let mut server = server_with!("Panel.luaux" => PANEL);
+    server.open(
+        "\
+--!strict
+local create = nil :: any
+local Panel = require(\"./Panel\")
+local header = Panel.Header
+local e = <Frame/>
+",
+    );
+    let _ = theirs(&mut server);
+
+    let mut result = Value::Null;
+    for _ in 0..40 {
+        result = server.request("textDocument/definition", server.at(3, 22));
+
+        if location(&result).is_some_and(|uri| uri.ends_with(".luaux")) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+
+    let uri = location(&result).unwrap_or_default();
+    assert!(!uri.contains("/build/"), "go-to-definition landed in generated code: {result:#?}");
+    assert!(uri.ends_with("Panel.luaux"), "{result:#?}");
+}
+
+/// The `uri` of the first location in a definition answer, whichever shape it
+/// came in.
+fn location(result: &Value) -> Option<String> {
+    let first = match result {
+        Value::Array(items) => items.first()?,
+        other => other,
+    };
+
+    Some(first.get("uri")?.as_str()?.to_string())
+}
+
 /// The Roblox form of the same question: `require(script.Parent.Card)`.
 ///
 /// Kept separate from the string-require test because it resolves by a

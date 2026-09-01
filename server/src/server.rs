@@ -545,10 +545,122 @@ impl Server {
                 return;
             }
 
+            let mapped = self.map_foreign(mapped);
             self.mark_stale(uri, mapped)
         };
 
         self.reply(id, merged(ours, mapped));
+    }
+
+    /// Locations pointing into *another* `.luaux`'s build output, brought home.
+    ///
+    /// [`Remap`] is built for one document pair and carries anything named by a
+    /// different `uri` through untouched — which is right for a hand-written
+    /// `.luau` and wrong for the generated half of a `.luaux`. Go-to-definition
+    /// on a component from another module is the case that shows it: the child
+    /// answers `build/App.luau`, and the editor opens generated code nobody
+    /// wrote, at a line that corresponds to nothing.
+    ///
+    /// Done as a second pass rather than by teaching `Remap` about many files:
+    /// each foreign document gets its own `Remap`, which rewrites the subtrees
+    /// naming it and leaves everything else alone. The drop rules — a location
+    /// that lands in `create(` is refused, not moved — then apply to those
+    /// locations exactly as they do to ours.
+    fn map_foreign(&mut self, value: Value) -> Value {
+        let mut uris = Vec::new();
+        collect_uris(&value, &mut uris);
+
+        let mut sources = Vec::new();
+        for uri in uris {
+            if let Some(foreign) = self.foreign(&uri) {
+                sources.push(foreign);
+            }
+        }
+
+        let mut value = value;
+
+        for foreign in sources {
+            let source_index = LineIndex::new(&foreign.source);
+            let output_index = LineIndex::new(&foreign.output);
+
+            let mut remap = Remap {
+                map: &foreign.map,
+                source: &foreign.source,
+                output: &foreign.output,
+                source_index: &source_index,
+                output_index: &output_index,
+                source_uri: &foreign.source_uri,
+                output_uri: &foreign.output_uri,
+                direction: Direction::Up,
+                dropped: false,
+            };
+
+            match remap.foreign_message(&value) {
+                Some(mapped) => value = mapped,
+                // The whole answer was in generated text. Nothing survives, and
+                // nothing is better than a place the author never wrote.
+                None => return Value::Null,
+            }
+        }
+
+        value
+    }
+
+    /// The `.luaux` behind a generated `.luau` the child named, with what it
+    /// takes to map into it.
+    fn foreign(&mut self, generated: &str) -> Option<Foreign> {
+        // Nothing to do for a URI that is not one of ours — the ordinary case,
+        // and the cheapest test is the one that rules it out.
+        if !generated.ends_with(".luau") {
+            return None;
+        }
+
+        // An open `.luaux` already has a current compile and map in hand.
+        let open = self.documents.uris().into_iter().find(|uri| {
+            self.generated_uri(uri).is_some_and(|ours| project::same_file(&ours, generated))
+        });
+
+        if let Some(uri) = open {
+            let document = self.documents.get(&uri)?;
+            let compiled = self.compiled.get(&uri)?;
+
+            return Some(Foreign {
+                output_uri: self.generated_uri(&uri)?,
+                source_uri: uri,
+                source: document.text.clone(),
+                output: compiled.output.clone(),
+                map: compiled.map.clone(),
+            });
+        }
+
+        // One nobody opened. The workspace knows where each `.luaux` builds to;
+        // the map is not kept beside it because this is the only thing that ever
+        // asks for one, and building a project's worth on every scan to serve
+        // the occasional go-to-definition is not a trade worth making.
+        let path = project::uri_to_path(generated)?;
+        let source = self
+            .workspace
+            .modules()
+            .find(|module| project::same_file(&project::path_to_uri(&module.build), generated))
+            .map(|module| module.source.clone())?;
+
+        let text = std::fs::read_to_string(&source).ok()?;
+        let project = self.projects.for_file(&source);
+        let compiled = luaux::compile::compile_recovering(
+            &text,
+            crate::backend(&project.config),
+            project.config.clone(),
+        )
+        .ok()?;
+        let map = crate::map_builder::build(&text, &compiled.output, &project.config);
+
+        Some(Foreign {
+            source_uri: project::path_to_uri(&source),
+            output_uri: project::path_to_uri(&path),
+            source: text,
+            output: compiled.output,
+            map,
+        })
     }
 
     // --- lifecycle ---------------------------------------------------------
@@ -1655,6 +1767,39 @@ fn lost_the_document(error: &Value) -> bool {
             .get("message")
             .and_then(Value::as_str)
             .is_some_and(|message| message.contains("No managed text document"))
+}
+
+/// Another `.luaux` in the project, and what it takes to map into it.
+struct Foreign {
+    /// The `.luaux` as the editor knows it.
+    source_uri: String,
+    /// Its build output, as luau-lsp named it.
+    output_uri: String,
+    source: String,
+    output: String,
+    map: crate::sourcemap::SourceMap,
+}
+
+/// Every `uri` named anywhere in a message.
+///
+/// `targetUri` is deliberately not collected: a `LocationLink` holds ranges in
+/// *two* files at once, and treating the whole object as the target's would move
+/// `originSelectionRange` — which belongs to the document that was asked about —
+/// through the wrong map.
+fn collect_uris(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::Array(items) => items.iter().for_each(|item| collect_uris(item, out)),
+        Value::Object(object) => {
+            if let Some(uri) = object.get("uri").and_then(Value::as_str) {
+                if !out.iter().any(|seen| seen == uri) {
+                    out.push(uri.to_string());
+                }
+            }
+
+            object.values().for_each(|item| collect_uris(item, out));
+        }
+        _ => {}
+    }
 }
 
 /// Joins our contribution to the child's, for the requests where both have
