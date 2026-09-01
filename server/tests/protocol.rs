@@ -99,6 +99,61 @@ fn completion_offers_a_classes_own_members() {
     assert!(labels.contains(&"BackgroundColor3"), "{labels:?}");
 }
 
+/// Completion is the one feature another language server can be given, so
+/// switching it off has to take nothing else with it.
+#[test]
+fn completion_can_be_switched_off() {
+    let mut server = Server::start();
+    server.initialize();
+    server.luaux = json!({ "completion": { "enabled": false } });
+    server.initialized();
+    server.open(SOURCE);
+
+    // The attribute name, which normally offers the class's own members.
+    assert!(server.completion(1, 17).is_empty());
+
+    // The rest of the server is untouched. This setting is about completion,
+    // not about whether to run.
+    assert!(server.diagnostics().is_empty());
+    let hover = server.request("textDocument/hover", server.at(1, 12));
+    let text = hover["contents"]["value"].as_str().expect("hover text");
+    assert!(text.contains("Roblox class"), "{text}");
+
+    // Switching it back on takes effect where it was switched off: in the
+    // settings, without a restart.
+    server.luaux = json!({ "completion": { "enabled": true } });
+    server.notify("workspace/didChangeConfiguration", json!({ "settings": {} }));
+    server.answer_configuration();
+
+    assert!(!server.completion(1, 17).is_empty());
+}
+
+/// Hover is the other feature another language server answers for the same
+/// file, and it is switched off the same way.
+#[test]
+fn hover_can_be_switched_off() {
+    let mut server = Server::start();
+    server.initialize();
+    server.luaux = json!({ "hover": { "enabled": false } });
+    server.initialized();
+    server.open(SOURCE);
+
+    // The tag name, which normally says what it resolved to.
+    assert!(server.request("textDocument/hover", server.at(1, 12)).is_null());
+
+    // The rest of the server is untouched.
+    assert!(server.diagnostics().is_empty());
+    assert!(!server.completion(1, 17).is_empty());
+
+    server.luaux = json!({ "hover": { "enabled": true } });
+    server.notify("workspace/didChangeConfiguration", json!({ "settings": {} }));
+    server.answer_configuration();
+
+    let hover = server.request("textDocument/hover", server.at(1, 12));
+    let text = hover["contents"]["value"].as_str().expect("hover text");
+    assert!(text.contains("Roblox class"), "{text}");
+}
+
 #[test]
 fn hover_on_a_tag_says_what_it_resolved_to() {
     let mut server = Server::started();
