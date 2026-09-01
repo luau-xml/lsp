@@ -51,6 +51,9 @@ enum Pending {
     /// Not a `Editor` forward, because none of that applies — the answer is not
     /// remapped but rebuilt, and the range is one we already know.
     ComponentProps { id: Value, tag: String, range: Value, snippets: bool },
+    /// The members of a dotted tag name, rebuilt over the segment the cursor is
+    /// in. Same reasoning as [`Pending::ComponentProps`].
+    TagMembers { id: Value, range: Value },
     /// The handshake with luau-lsp.
     Initialize,
 }
@@ -355,7 +358,11 @@ impl Server {
         let Some(wanted) = params.get("id") else { return };
 
         let forwarded = self.pending.iter().find_map(|(child, pending)| match pending {
-            Pending::Editor { id, .. } | Pending::ComponentProps { id, .. } if id == wanted => {
+            Pending::Editor { id, .. }
+            | Pending::ComponentProps { id, .. }
+            | Pending::TagMembers { id, .. }
+                if id == wanted =>
+            {
                 Some(*child)
             }
             _ => None,
@@ -463,6 +470,7 @@ impl Server {
             Pending::ComponentProps { id, tag, range, snippets } => {
                 self.answer_component_props(id, &tag, range, snippets, body)
             }
+            Pending::TagMembers { id, range } => self.answer_tag_members(id, range, body),
         }
     }
 
@@ -1064,7 +1072,7 @@ impl Server {
         for (_, pending) in std::mem::take(&mut self.pending) {
             match pending {
                 Pending::Editor { id, ours, .. } => self.reply(id, merged(ours, Value::Null)),
-                Pending::ComponentProps { id, .. } => {
+                Pending::ComponentProps { id, .. } | Pending::TagMembers { id, .. } => {
                     self.reply(id, json!({ "isIncomplete": false, "items": [] }))
                 }
                 Pending::Initialize => {}
@@ -1360,7 +1368,92 @@ impl Server {
             Completion::ComponentProps { start, prefix } => {
                 self.component_props(id, &uri, offset, start, &prefix, snippets)
             }
+            Completion::TagMembers { start, prefix } => {
+                self.tag_members(id, &uri, offset, start, &prefix)
+            }
         }
+    }
+
+    /// Asks luau-lsp what `App` holds, at the member expression the tag becomes.
+    ///
+    /// Derived and then **checked**, exactly as [`Server::component_props`]
+    /// derives its position: the tag name is emitted verbatim, so the offset
+    /// just past its last dot is a member completion in the generated file — but
+    /// only if the run still spells this tag, which a compile that failed and
+    /// left the previous map behind does not guarantee.
+    fn tag_members(&mut self, id: Value, uri: &str, offset: usize, start: usize, prefix: &str) {
+        let empty = json!({ "isIncomplete": false, "items": [] });
+
+        let (Some(document), Some(compiled), Some(generated)) =
+            (self.documents.get(uri), self.compiled.get(uri), self.generated_uri(uri))
+        else {
+            return self.reply(id, empty);
+        };
+
+        let tags = crate::tree::tree(&document.text);
+        let Some(tag) = crate::tree::innermost_at(&tags, offset) else {
+            return self.reply(id, empty);
+        };
+
+        let Some(after_dot) = member_position(&compiled.map, &compiled.output, tag) else {
+            return self.reply(id, empty);
+        };
+
+        // Only the segment being typed is replaced. `App.` stays put, so the
+        // editor filters what comes back against `Hea` rather than `App.Hea`.
+        let range = document.range_at(start + scan::member_offset(prefix), start + prefix.len());
+        let position = LineIndex::new(&compiled.output).position(&compiled.output, after_dot);
+
+        if !self.child_ready {
+            return self.reply(id, empty);
+        }
+
+        if !self.opened_in_child.contains(&generated) {
+            self.sync_child(uri);
+        }
+
+        let request = json!({
+            "textDocument": { "uri": generated },
+            "position": { "line": position.line, "character": position.character },
+        });
+
+        let Some(proxy) = &mut self.proxy else {
+            return self.reply(id, empty);
+        };
+
+        match proxy.request("textDocument/completion", request) {
+            Ok(child_id) => {
+                self.pending.insert(child_id, Pending::TagMembers { id, range });
+            }
+            Err(error) => {
+                self.log(1, &format!("luau-lsp: {error}"));
+                self.reply(id, empty);
+            }
+        }
+    }
+
+    /// The child's members, as tag names over the segment the cursor is in.
+    fn answer_tag_members(&mut self, id: Value, range: Value, body: Value) {
+        let empty = json!({ "isIncomplete": false, "items": [] });
+
+        if body.get("error").is_some() {
+            return self.reply(id, empty);
+        }
+
+        let result = body.get("result").cloned().unwrap_or(Value::Null);
+
+        let items = match &result {
+            Value::Array(items) => items.clone(),
+            other => other.get("items").and_then(Value::as_array).cloned().unwrap_or_default(),
+        };
+
+        let mut list = completion::members(&items, &range);
+
+        if result.get("isIncomplete") == Some(&Value::Bool(true)) {
+            list["isIncomplete"] = json!(true);
+        }
+
+        self.reply(id, list);
     }
 
     /// Asks luau-lsp for a component's props, at the generated call it becomes.
@@ -1556,10 +1649,23 @@ impl Server {
         };
 
         match hover::definition(document, &project, offset) {
-            // Definition never asks for both — a component tag's binding is in
-            // the `.luaux`, and that is the whole answer.
-            hover::Answer::Ours(value) | hover::Answer::Both { ours: value, .. } => {
-                self.reply(id, value)
+            // A plain component tag's binding is in this `.luaux`, and that is
+            // the whole answer.
+            hover::Answer::Ours(value) => self.reply(id, value),
+            // A dotted one is the exception: `<App.Header/>` compiles to
+            // `App.Header(…)`, and where `Header` is written is luau-lsp's to
+            // know — routinely in another file. Ours, the binding of `App`,
+            // travels as the fallback for when it cannot answer.
+            hover::Answer::Both { ours, at } => {
+                let mut params = params;
+
+                if let Some(position) =
+                    self.documents.get(&uri).map(|document| document.range_at(at, at))
+                {
+                    params["position"] = position["start"].clone();
+                }
+
+                self.forward(id, "textDocument/definition", params, Some(ours), false)
             }
             hover::Answer::Nothing => self.reply(id, Value::Null),
             hover::Answer::Forward => {
@@ -1741,6 +1847,35 @@ fn props_table(
     // `Row` then `({`, and nothing between: an intrinsic's `create("Frame")({`
     // does not reach here, since a class tag name records no run.
     (output.get(after..after + 2) == Some("({")).then_some(after + 2)
+}
+
+/// Where the member of a dotted tag name sits in the generated output.
+///
+/// `<App.Header/>` compiles to `App.Header(…)` with the name emitted verbatim,
+/// so the offset just past the dot is a member completion on `App`. Checked
+/// against the output for the reason [`props_table`] gives at length: a map
+/// kept from the last compile that succeeded describes a revision this tag may
+/// no longer belong to, and offering another table's members under this name
+/// would be worse than offering none.
+fn member_position(
+    map: &crate::sourcemap::SourceMap,
+    output: &str,
+    tag: &crate::tree::Tag,
+) -> Option<usize> {
+    let dot = scan::member_offset(&tag.name);
+
+    if dot == 0 {
+        return None;
+    }
+
+    let name = map.to_output(tag.open_name.0)?;
+    let after = name + (tag.open_name.1 - tag.open_name.0);
+
+    if output.get(name..after) != Some(tag.name.as_str()) {
+        return None;
+    }
+
+    Some(name + dot)
 }
 
 /// Whether an error from luau-lsp describes its own condition rather than the
