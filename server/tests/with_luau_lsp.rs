@@ -935,6 +935,59 @@ fn the_missing_build_output_is_written_for_it() {
     assert!(!text.contains("<Frame"), "the .luaux was written through uncompiled: {text}");
 }
 
+/// The dependency is open in another tab, which is the ordinary way two
+/// `.luaux` get written.
+///
+/// Being open decides where the *text* comes from and nothing else: existence
+/// is still checked on the filesystem, and an open document luau-lsp was handed
+/// is not on it. The workspace scan used to skip such a file entirely — the
+/// write along with the compile — so a project that had never been built typed
+/// the required module as `*error-type*` for as long as its tab stayed open,
+/// and closing the tab fixed it.
+///
+/// Both documents arrive before the child is answered into existence, which is
+/// what a window reloaded with two `.luaux` open actually produces.
+#[test]
+fn a_dependency_open_in_another_tab_still_resolves() {
+    let Some(path) = harness::find_luau_lsp() else {
+        eprintln!("skipped: no working luau-lsp found. Set LUAU_LSP=<path> to run this test.");
+        return;
+    };
+
+    let mut server = Server::with_luau_lsp(Some(path));
+    let card = server.root().join("src").join("Card.luaux");
+    std::fs::write(&card, CARD).expect("write dependency");
+
+    server.initialize();
+    server.notify("initialized", json!({}));
+
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": harness::uri_for(&card),
+                "languageId": "luaux",
+                "version": 1,
+                "text": CARD,
+            },
+        }),
+    );
+
+    server.answer_configuration();
+    server.open(APP);
+
+    let messages = complaints(&mut server);
+
+    assert!(
+        !messages.iter().any(|message| message.contains("Unknown require")),
+        "an open dependency did not resolve: {messages:#?}"
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("number") && message.contains("string")),
+        "no type error from the required .luaux: {messages:#?}"
+    );
+}
+
 /// A dependency the editor never opened, edited on disk — a branch switch is
 /// the ordinary case — is recompiled and re-typed.
 ///

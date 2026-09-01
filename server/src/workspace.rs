@@ -144,8 +144,21 @@ impl Workspace {
             found.insert(source.clone());
 
             if open.contains(&source) {
-                // The editor's buffer is the truth for this one, and the server
-                // syncs it on every keystroke.
+                // The editor's buffer is the truth for its *content*, and the
+                // server syncs it from there on every keystroke — but content is
+                // only half of what a require needs. Existence is checked on the
+                // filesystem, and a `.luaux` that has never been built has
+                // nothing at its build path, so a require of it is
+                // `Unknown require` however fresh the text handed over is.
+                //
+                // Being open in a tab is not what decides that, which is why the
+                // skip cannot cover the write as well: someone editing two
+                // `.luaux` at once hits this immediately, and the one in the
+                // other tab types as `*error-type*` in the file requiring it.
+                if materialise_open(&source, project) {
+                    changes.materialised += 1;
+                }
+
                 continue;
             }
 
@@ -230,6 +243,41 @@ impl Workspace {
     pub fn warn_once(&mut self) -> bool {
         !std::mem::replace(&mut self.warned, true)
     }
+}
+
+/// Writes a build output for a source the editor has open, if nothing is there.
+///
+/// Compiled from disk, which is the one place a `.luaux`'s *saved* text is the
+/// right answer: nothing written here is handed to the child — the server does
+/// that from the live buffer — so this only has to satisfy an existence check,
+/// and what lands at the build path is exactly what `luaux build` would write
+/// for the file as it currently stands on disk.
+///
+/// Returns whether a file was created.
+fn materialise_open(source: &Path, project: &Project) -> bool {
+    let build = project.build_path(source);
+
+    // Compiling is not free, and a project that has been built once never needs
+    // any of this. The write itself refuses an occupied path too — see
+    // [`Module::materialise`] — this is only to skip the work in front of it.
+    if build.exists() {
+        return false;
+    }
+
+    let Ok(text) = std::fs::read_to_string(source) else { return false };
+
+    let Ok(compiled) = luaux::compile::compile_recovering(
+        &text,
+        crate::backend(&project.config),
+        project.config.clone(),
+    ) else {
+        return false;
+    };
+
+    // `mtime: None` because this module is deliberately not recorded: the file
+    // is the editor's, and the server hands the child its text from the buffer.
+    Module { source: source.to_path_buf(), build, output: compiled.output, mtime: None }
+        .materialise()
 }
 
 /// Every `.luaux` under `directory`, skipping the build output and the usual
@@ -399,6 +447,51 @@ mod tests {
 
         assert_eq!(changes.seen, 1);
         assert!(changes.updated.is_empty(), "an open document was compiled from disk");
+    }
+
+    /// Content is not the whole of what a require needs. luau-lsp checks the
+    /// filesystem for *existence*, and an open document it was handed is not on
+    /// it — so without this, requiring a `.luaux` that happens to be open in
+    /// another tab answers `Unknown require`, and the binding types as
+    /// `*error-type*`.
+    ///
+    /// The skip above it is about where the *text* comes from, and it used to
+    /// take the write with it.
+    #[test]
+    fn a_file_open_in_the_editor_still_gets_a_build_output() {
+        let temporary = Temporary::new("openoutput");
+        let source = temporary.write("src/Card.luaux", CARD);
+        let project = project(&temporary.0);
+
+        let open = HashSet::from([source]);
+        let changes = Workspace::default().scan(&project, &open);
+
+        assert_eq!(changes.materialised, 1);
+        let built = temporary.0.join("build/Card.luau");
+        assert!(built.is_file(), "nothing was written to {}", built.display());
+        assert!(
+            std::fs::read_to_string(&built).expect("read").contains("Card"),
+            "the build path holds something other than this file's output"
+        );
+    }
+
+    /// The same restraint the unopened path shows: a real `luaux build` owns
+    /// these paths, and being open in the editor is no reason to race it.
+    #[test]
+    fn an_open_files_existing_build_output_is_never_overwritten() {
+        let temporary = Temporary::new("openexisting");
+        let source = temporary.write("src/Card.luaux", CARD);
+        let existing = temporary.write("build/Card.luau", "-- written by luaux build\n");
+        let project = project(&temporary.0);
+
+        let open = HashSet::from([source]);
+        let changes = Workspace::default().scan(&project, &open);
+
+        assert_eq!(changes.materialised, 0);
+        assert_eq!(
+            std::fs::read_to_string(&existing).expect("read"),
+            "-- written by luaux build\n"
+        );
     }
 
     #[test]
