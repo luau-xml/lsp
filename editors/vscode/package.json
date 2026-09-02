@@ -2,7 +2,7 @@
   "name": "luaux-lsp",
   "displayName": "LuauX LSP",
   "description": "Editor support for .luaux \u2014 highlighting, completion and diagnostics for LuauX, JSX-style markup for Luau",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "RyanCundiff",
   "license": "MIT",
   "repository": {
