@@ -65,6 +65,16 @@
           "default": true,
           "markdownDescription": "Close a tag as you finish opening it: typing `<Frame>` puts `</Frame>` after the cursor."
         },
+        "luaux.completion.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Offer completions. Turn it off to leave them to another language server; every other feature keeps working."
+        },
+        "luaux.hover.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Answer hovers. Turn it off to leave them to another language server; every other feature keeps working."
+        },
         "luaux.plugin.enabled": {
           "type": "boolean",
           "default": true,

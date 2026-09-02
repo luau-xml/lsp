@@ -935,6 +935,59 @@ fn the_missing_build_output_is_written_for_it() {
     assert!(!text.contains("<Frame"), "the .luaux was written through uncompiled: {text}");
 }
 
+/// The dependency is open in another tab, which is the ordinary way two
+/// `.luaux` get written.
+///
+/// Being open decides where the *text* comes from and nothing else: existence
+/// is still checked on the filesystem, and an open document luau-lsp was handed
+/// is not on it. The workspace scan used to skip such a file entirely — the
+/// write along with the compile — so a project that had never been built typed
+/// the required module as `*error-type*` for as long as its tab stayed open,
+/// and closing the tab fixed it.
+///
+/// Both documents arrive before the child is answered into existence, which is
+/// what a window reloaded with two `.luaux` open actually produces.
+#[test]
+fn a_dependency_open_in_another_tab_still_resolves() {
+    let Some(path) = harness::find_luau_lsp() else {
+        eprintln!("skipped: no working luau-lsp found. Set LUAU_LSP=<path> to run this test.");
+        return;
+    };
+
+    let mut server = Server::with_luau_lsp(Some(path));
+    let card = server.root().join("src").join("Card.luaux");
+    std::fs::write(&card, CARD).expect("write dependency");
+
+    server.initialize();
+    server.notify("initialized", json!({}));
+
+    server.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": harness::uri_for(&card),
+                "languageId": "luaux",
+                "version": 1,
+                "text": CARD,
+            },
+        }),
+    );
+
+    server.answer_configuration();
+    server.open(APP);
+
+    let messages = complaints(&mut server);
+
+    assert!(
+        !messages.iter().any(|message| message.contains("Unknown require")),
+        "an open dependency did not resolve: {messages:#?}"
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("number") && message.contains("string")),
+        "no type error from the required .luaux: {messages:#?}"
+    );
+}
+
 /// A dependency the editor never opened, edited on disk — a branch switch is
 /// the ordinary case — is recompiled and re-typed.
 ///
@@ -997,6 +1050,171 @@ fn an_existing_build_output_is_left_alone() {
         "-- written by luaux build\n",
         "the server overwrote the build's own output"
     );
+}
+
+// --- a tag that names a member ---------------------------------------------
+//
+// `<Panel.Header/>` is one name in the source and `Panel.Header(…)` in the
+// output, and the two ends of that name answer different questions. Everything
+// here is about asking the *member*: the table is where it came from, which is
+// rarely what was wanted and never the whole answer.
+
+/// A module whose export is a table of components — the shape a dotted tag
+/// names.
+const PANEL: &str = "\
+--!strict
+local create = nil :: any
+local Panel = {}
+
+function Panel.Header(props: { Title: string })
+\treturn create(\"Frame\")(props)
+end
+
+return Panel
+";
+
+/// Line 3 is the tag; `Header` starts at column 17 and the dot is at 16.
+const USES_PANEL: &str = "\
+--!strict
+local create = nil :: any
+local Panel = require(\"./Panel\")
+local e = <Panel.Header Title=\"x\" />
+";
+
+/// Hovering `<Panel.Header/>` is a question about `Header`.
+///
+/// Asking at the start of the name answers about `Panel` — the table, printed
+/// with its other members elided as `... 1 more ...` — which says nothing about
+/// the component the cursor is on.
+#[test]
+fn a_dotted_tag_hovers_with_the_members_type() {
+    let mut server = server_with!("Panel.luaux" => PANEL);
+    server.open(USES_PANEL);
+    let _ = theirs(&mut server);
+
+    let mut text = String::new();
+    for _ in 0..40 {
+        let hover = server.request("textDocument/hover", server.at(3, 19));
+        text = hover.pointer("/contents/value").and_then(Value::as_str).unwrap_or("").to_string();
+
+        if text.contains("Title") && !text.contains("local Panel") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+
+    assert!(text.contains("Title"), "the member's own signature never arrived: {text}");
+    // The table binding is what asking at the start of the name gives:
+    // `local Panel: { Header: … }`, with the component one level in — and it
+    // mentions `Title` too, so the presence of the type is not the test.
+    assert!(!text.contains("local Panel"), "this is the table, not the member: {text}");
+}
+
+/// And going to its definition arrives at `Panel.Header`, in the file that
+/// declares it.
+///
+/// The binding of `Panel` is in *this* file and is the wrong answer twice over:
+/// it is not where `Header` is written, and it is not even in the module that
+/// has it.
+#[test]
+fn a_dotted_tags_definition_is_the_member_not_the_table() {
+    let mut server = server_with!("Panel.luaux" => PANEL);
+    server.open(USES_PANEL);
+    let _ = theirs(&mut server);
+
+    let mut result = Value::Null;
+    for _ in 0..40 {
+        result = server.request("textDocument/definition", server.at(3, 19));
+
+        if location(&result).is_some_and(|uri| uri.ends_with("Panel.luaux")) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+
+    let uri = location(&result).unwrap_or_default();
+    assert!(uri.ends_with("Panel.luaux"), "went somewhere else entirely: {result:#?}");
+}
+
+/// `<Panel.|` offers what `Panel` holds.
+///
+/// The class list is not merely useless after a dot, it is wrong: there is no
+/// `Panel.Frame`, and nine hundred entries saying otherwise bury the one name
+/// that would have worked.
+#[test]
+fn a_dotted_tag_completes_the_tables_members() {
+    let mut server = server_with!("Panel.luaux" => PANEL);
+    server.open(USES_PANEL);
+    let _ = theirs(&mut server);
+
+    let mut labels: Vec<String> = Vec::new();
+    for _ in 0..40 {
+        labels = server
+            .completion(3, 17)
+            .iter()
+            .filter_map(|item| item["label"].as_str())
+            .map(str::to_string)
+            .collect();
+
+        if labels.iter().any(|label| label == "Header") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+
+    assert!(labels.contains(&"Header".to_string()), "{labels:?}");
+    assert!(
+        !labels.iter().any(|label| label == "Frame"),
+        "the class list is still here: {labels:?}"
+    );
+}
+
+/// A location in *another* `.luaux` comes home to its source.
+///
+/// `Remap` is built for one document pair and carries anything named by a
+/// different `uri` through untouched. For a hand-written `.luau` that is right;
+/// for the generated half of a `.luaux` it opens `build/Panel.luau` — code
+/// nobody wrote, at a line that corresponds to nothing. Asked as ordinary Luau
+/// rather than through a tag, because the leak is in the answer and has nothing
+/// to do with markup.
+#[test]
+fn a_definition_in_another_luaux_comes_home_to_its_source() {
+    let mut server = server_with!("Panel.luaux" => PANEL);
+    server.open(
+        "\
+--!strict
+local create = nil :: any
+local Panel = require(\"./Panel\")
+local header = Panel.Header
+local e = <Frame/>
+",
+    );
+    let _ = theirs(&mut server);
+
+    let mut result = Value::Null;
+    for _ in 0..40 {
+        result = server.request("textDocument/definition", server.at(3, 22));
+
+        if location(&result).is_some_and(|uri| uri.ends_with(".luaux")) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+
+    let uri = location(&result).unwrap_or_default();
+    assert!(!uri.contains("/build/"), "go-to-definition landed in generated code: {result:#?}");
+    assert!(uri.ends_with("Panel.luaux"), "{result:#?}");
+}
+
+/// The `uri` of the first location in a definition answer, whichever shape it
+/// came in.
+fn location(result: &Value) -> Option<String> {
+    let first = match result {
+        Value::Array(items) => items.first()?,
+        other => other,
+    };
+
+    Some(first.get("uri")?.as_str()?.to_string())
 }
 
 /// The Roblox form of the same question: `require(script.Parent.Card)`.

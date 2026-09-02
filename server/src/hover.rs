@@ -156,11 +156,24 @@ pub fn definition(document: &Document, project: &Project, offset: usize) -> Answ
     let name = tag.name;
     let root = name.split('.').next().unwrap_or(&name);
 
-    match bindings::find(&document.text, root) {
-        Some((start, end)) => Answer::Ours(json!({
+    let ours = bindings::find(&document.text, root).map(|(start, end)| {
+        json!({
             "uri": document.uri,
             "range": document.range_at(start, end),
-        })),
+        })
+    });
+
+    // For a dotted name that binding is where the *table* came from, and where
+    // `Bar` is written is what someone asks for when they go to the definition
+    // of `<Foo.Bar/>` — usually in another file altogether. The tag compiles to
+    // `Foo.Bar(…)`, so luau-lsp can answer it; the root binding travels as the
+    // fallback for when there is no child to ask.
+    if name.contains('.') {
+        return Answer::Both { ours: ours.unwrap_or(Value::Null), at: tag.declared_at };
+    }
+
+    match ours {
+        Some(value) => Answer::Ours(value),
         None => Answer::Nothing,
     }
 }
@@ -190,7 +203,7 @@ fn tag_at(document: &Document, offset: usize) -> Option<TagAt> {
             return Some(TagAt {
                 name: tag.name.clone(),
                 range: document.range_at(start, end),
-                declared_at: tag.open_name.0,
+                declared_at: tag.open_name.0 + scan::member_offset(&tag.name),
             });
         }
     }
@@ -201,7 +214,8 @@ fn tag_at(document: &Document, offset: usize) -> Option<TagAt> {
     match scan::scan(source, offset).context {
         Context::TagName { start, prefix, .. } if !prefix.is_empty() => {
             let end = start + prefix.len();
-            Some(TagAt { name: prefix, range: document.range_at(start, end), declared_at: start })
+            let declared_at = start + scan::member_offset(&prefix);
+            Some(TagAt { name: prefix, range: document.range_at(start, end), declared_at })
         }
         _ => None,
     }

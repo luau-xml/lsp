@@ -51,6 +51,9 @@ enum Pending {
     /// Not a `Editor` forward, because none of that applies — the answer is not
     /// remapped but rebuilt, and the range is one we already know.
     ComponentProps { id: Value, tag: String, range: Value, snippets: bool },
+    /// The members of a dotted tag name, rebuilt over the segment the cursor is
+    /// in. Same reasoning as [`Pending::ComponentProps`].
+    TagMembers { id: Value, range: Value },
     /// The handshake with luau-lsp.
     Initialize,
 }
@@ -355,7 +358,11 @@ impl Server {
         let Some(wanted) = params.get("id") else { return };
 
         let forwarded = self.pending.iter().find_map(|(child, pending)| match pending {
-            Pending::Editor { id, .. } | Pending::ComponentProps { id, .. } if id == wanted => {
+            Pending::Editor { id, .. }
+            | Pending::ComponentProps { id, .. }
+            | Pending::TagMembers { id, .. }
+                if id == wanted =>
+            {
                 Some(*child)
             }
             _ => None,
@@ -463,6 +470,7 @@ impl Server {
             Pending::ComponentProps { id, tag, range, snippets } => {
                 self.answer_component_props(id, &tag, range, snippets, body)
             }
+            Pending::TagMembers { id, range } => self.answer_tag_members(id, range, body),
         }
     }
 
@@ -545,10 +553,122 @@ impl Server {
                 return;
             }
 
+            let mapped = self.map_foreign(mapped);
             self.mark_stale(uri, mapped)
         };
 
         self.reply(id, merged(ours, mapped));
+    }
+
+    /// Locations pointing into *another* `.luaux`'s build output, brought home.
+    ///
+    /// [`Remap`] is built for one document pair and carries anything named by a
+    /// different `uri` through untouched — which is right for a hand-written
+    /// `.luau` and wrong for the generated half of a `.luaux`. Go-to-definition
+    /// on a component from another module is the case that shows it: the child
+    /// answers `build/App.luau`, and the editor opens generated code nobody
+    /// wrote, at a line that corresponds to nothing.
+    ///
+    /// Done as a second pass rather than by teaching `Remap` about many files:
+    /// each foreign document gets its own `Remap`, which rewrites the subtrees
+    /// naming it and leaves everything else alone. The drop rules — a location
+    /// that lands in `create(` is refused, not moved — then apply to those
+    /// locations exactly as they do to ours.
+    fn map_foreign(&mut self, value: Value) -> Value {
+        let mut uris = Vec::new();
+        collect_uris(&value, &mut uris);
+
+        let mut sources = Vec::new();
+        for uri in uris {
+            if let Some(foreign) = self.foreign(&uri) {
+                sources.push(foreign);
+            }
+        }
+
+        let mut value = value;
+
+        for foreign in sources {
+            let source_index = LineIndex::new(&foreign.source);
+            let output_index = LineIndex::new(&foreign.output);
+
+            let mut remap = Remap {
+                map: &foreign.map,
+                source: &foreign.source,
+                output: &foreign.output,
+                source_index: &source_index,
+                output_index: &output_index,
+                source_uri: &foreign.source_uri,
+                output_uri: &foreign.output_uri,
+                direction: Direction::Up,
+                dropped: false,
+            };
+
+            match remap.foreign_message(&value) {
+                Some(mapped) => value = mapped,
+                // The whole answer was in generated text. Nothing survives, and
+                // nothing is better than a place the author never wrote.
+                None => return Value::Null,
+            }
+        }
+
+        value
+    }
+
+    /// The `.luaux` behind a generated `.luau` the child named, with what it
+    /// takes to map into it.
+    fn foreign(&mut self, generated: &str) -> Option<Foreign> {
+        // Nothing to do for a URI that is not one of ours — the ordinary case,
+        // and the cheapest test is the one that rules it out.
+        if !generated.ends_with(".luau") {
+            return None;
+        }
+
+        // An open `.luaux` already has a current compile and map in hand.
+        let open = self.documents.uris().into_iter().find(|uri| {
+            self.generated_uri(uri).is_some_and(|ours| project::same_file(&ours, generated))
+        });
+
+        if let Some(uri) = open {
+            let document = self.documents.get(&uri)?;
+            let compiled = self.compiled.get(&uri)?;
+
+            return Some(Foreign {
+                output_uri: self.generated_uri(&uri)?,
+                source_uri: uri,
+                source: document.text.clone(),
+                output: compiled.output.clone(),
+                map: compiled.map.clone(),
+            });
+        }
+
+        // One nobody opened. The workspace knows where each `.luaux` builds to;
+        // the map is not kept beside it because this is the only thing that ever
+        // asks for one, and building a project's worth on every scan to serve
+        // the occasional go-to-definition is not a trade worth making.
+        let path = project::uri_to_path(generated)?;
+        let source = self
+            .workspace
+            .modules()
+            .find(|module| project::same_file(&project::path_to_uri(&module.build), generated))
+            .map(|module| module.source.clone())?;
+
+        let text = std::fs::read_to_string(&source).ok()?;
+        let project = self.projects.for_file(&source);
+        let compiled = luaux::compile::compile_recovering(
+            &text,
+            crate::backend(&project.config),
+            project.config.clone(),
+        )
+        .ok()?;
+        let map = crate::map_builder::build(&text, &compiled.output, &project.config);
+
+        Some(Foreign {
+            source_uri: project::path_to_uri(&source),
+            output_uri: project::path_to_uri(&path),
+            source: text,
+            output: compiled.output,
+            map,
+        })
     }
 
     // --- lifecycle ---------------------------------------------------------
@@ -606,6 +726,20 @@ impl Server {
         }
 
         self.start_child();
+    }
+
+    /// Whether `luaux.completion.enabled` is off.
+    ///
+    /// Absent means on, the way `luau-lsp.fflags.enableByDefault` is read. A
+    /// setting the editor has not answered yet must not switch a feature off.
+    fn completion_disabled(&self) -> bool {
+        self.ours_settings.pointer("/completion/enabled") == Some(&Value::Bool(false))
+    }
+
+    /// Whether `luaux.hover.enabled` is off. Read the way
+    /// [`Server::completion_disabled`] is.
+    fn hover_disabled(&self) -> bool {
+        self.ours_settings.pointer("/hover/enabled") == Some(&Value::Bool(false))
     }
 
     fn start_child(&mut self) {
@@ -952,7 +1086,7 @@ impl Server {
         for (_, pending) in std::mem::take(&mut self.pending) {
             match pending {
                 Pending::Editor { id, ours, .. } => self.reply(id, merged(ours, Value::Null)),
-                Pending::ComponentProps { id, .. } => {
+                Pending::ComponentProps { id, .. } | Pending::TagMembers { id, .. } => {
                     self.reply(id, json!({ "isIncomplete": false, "items": [] }))
                 }
                 Pending::Initialize => {}
@@ -1227,6 +1361,14 @@ impl Server {
     // --- features ----------------------------------------------------------
 
     fn completion(&mut self, id: Value, params: Value) {
+        // Switched off, so that another server on `.luaux` answers instead of
+        // both of us. Refused here rather than by withholding the capability:
+        // settings arrive after `initialize`, and a gate on the request takes a
+        // change of mind at once, where a capability would need a restart.
+        if self.completion_disabled() {
+            return self.reply(id, Value::Null);
+        }
+
         let Some((uri, offset)) = self.locate(&params) else {
             return self.reply(id, Value::Null);
         };
@@ -1248,7 +1390,92 @@ impl Server {
             Completion::ComponentProps { start, prefix } => {
                 self.component_props(id, &uri, offset, start, &prefix, snippets)
             }
+            Completion::TagMembers { start, prefix } => {
+                self.tag_members(id, &uri, offset, start, &prefix)
+            }
         }
+    }
+
+    /// Asks luau-lsp what `App` holds, at the member expression the tag becomes.
+    ///
+    /// Derived and then **checked**, exactly as [`Server::component_props`]
+    /// derives its position: the tag name is emitted verbatim, so the offset
+    /// just past its last dot is a member completion in the generated file — but
+    /// only if the run still spells this tag, which a compile that failed and
+    /// left the previous map behind does not guarantee.
+    fn tag_members(&mut self, id: Value, uri: &str, offset: usize, start: usize, prefix: &str) {
+        let empty = json!({ "isIncomplete": false, "items": [] });
+
+        let (Some(document), Some(compiled), Some(generated)) =
+            (self.documents.get(uri), self.compiled.get(uri), self.generated_uri(uri))
+        else {
+            return self.reply(id, empty);
+        };
+
+        let tags = crate::tree::tree(&document.text);
+        let Some(tag) = crate::tree::innermost_at(&tags, offset) else {
+            return self.reply(id, empty);
+        };
+
+        let Some(after_dot) = member_position(&compiled.map, &compiled.output, tag) else {
+            return self.reply(id, empty);
+        };
+
+        // Only the segment being typed is replaced. `App.` stays put, so the
+        // editor filters what comes back against `Hea` rather than `App.Hea`.
+        let range = document.range_at(start + scan::member_offset(prefix), start + prefix.len());
+        let position = LineIndex::new(&compiled.output).position(&compiled.output, after_dot);
+
+        if !self.child_ready {
+            return self.reply(id, empty);
+        }
+
+        if !self.opened_in_child.contains(&generated) {
+            self.sync_child(uri);
+        }
+
+        let request = json!({
+            "textDocument": { "uri": generated },
+            "position": { "line": position.line, "character": position.character },
+        });
+
+        let Some(proxy) = &mut self.proxy else {
+            return self.reply(id, empty);
+        };
+
+        match proxy.request("textDocument/completion", request) {
+            Ok(child_id) => {
+                self.pending.insert(child_id, Pending::TagMembers { id, range });
+            }
+            Err(error) => {
+                self.log(1, &format!("luau-lsp: {error}"));
+                self.reply(id, empty);
+            }
+        }
+    }
+
+    /// The child's members, as tag names over the segment the cursor is in.
+    fn answer_tag_members(&mut self, id: Value, range: Value, body: Value) {
+        let empty = json!({ "isIncomplete": false, "items": [] });
+
+        if body.get("error").is_some() {
+            return self.reply(id, empty);
+        }
+
+        let result = body.get("result").cloned().unwrap_or(Value::Null);
+
+        let items = match &result {
+            Value::Array(items) => items.clone(),
+            other => other.get("items").and_then(Value::as_array).cloned().unwrap_or_default(),
+        };
+
+        let mut list = completion::members(&items, &range);
+
+        if result.get("isIncomplete") == Some(&Value::Bool(true)) {
+            list["isIncomplete"] = json!(true);
+        }
+
+        self.reply(id, list);
     }
 
     /// Asks luau-lsp for a component's props, at the generated call it becomes.
@@ -1393,6 +1620,13 @@ impl Server {
     }
 
     fn hover(&mut self, id: Value, params: Value) {
+        // Switched off, so that another server on `.luaux` answers instead of
+        // both of us. Gated on the request rather than on the capability, for
+        // the reason `completion` gives.
+        if self.hover_disabled() {
+            return self.reply(id, Value::Null);
+        }
+
         let Some((uri, offset)) = self.locate(&params) else {
             return self.reply(id, Value::Null);
         };
@@ -1444,10 +1678,23 @@ impl Server {
         };
 
         match hover::definition(document, &project, offset) {
-            // Definition never asks for both — a component tag's binding is in
-            // the `.luaux`, and that is the whole answer.
-            hover::Answer::Ours(value) | hover::Answer::Both { ours: value, .. } => {
-                self.reply(id, value)
+            // A plain component tag's binding is in this `.luaux`, and that is
+            // the whole answer.
+            hover::Answer::Ours(value) => self.reply(id, value),
+            // A dotted one is the exception: `<App.Header/>` compiles to
+            // `App.Header(…)`, and where `Header` is written is luau-lsp's to
+            // know — routinely in another file. Ours, the binding of `App`,
+            // travels as the fallback for when it cannot answer.
+            hover::Answer::Both { ours, at } => {
+                let mut params = params;
+
+                if let Some(position) =
+                    self.documents.get(&uri).map(|document| document.range_at(at, at))
+                {
+                    params["position"] = position["start"].clone();
+                }
+
+                self.forward(id, "textDocument/definition", params, Some(ours), false)
             }
             hover::Answer::Nothing => self.reply(id, Value::Null),
             hover::Answer::Forward => {
@@ -1631,6 +1878,35 @@ fn props_table(
     (output.get(after..after + 2) == Some("({")).then_some(after + 2)
 }
 
+/// Where the member of a dotted tag name sits in the generated output.
+///
+/// `<App.Header/>` compiles to `App.Header(…)` with the name emitted verbatim,
+/// so the offset just past the dot is a member completion on `App`. Checked
+/// against the output for the reason [`props_table`] gives at length: a map
+/// kept from the last compile that succeeded describes a revision this tag may
+/// no longer belong to, and offering another table's members under this name
+/// would be worse than offering none.
+fn member_position(
+    map: &crate::sourcemap::SourceMap,
+    output: &str,
+    tag: &crate::tree::Tag,
+) -> Option<usize> {
+    let dot = scan::member_offset(&tag.name);
+
+    if dot == 0 {
+        return None;
+    }
+
+    let name = map.to_output(tag.open_name.0)?;
+    let after = name + (tag.open_name.1 - tag.open_name.0);
+
+    if output.get(name..after) != Some(tag.name.as_str()) {
+        return None;
+    }
+
+    Some(name + dot)
+}
+
 /// Whether an error from luau-lsp describes its own condition rather than the
 /// request.
 ///
@@ -1655,6 +1931,39 @@ fn lost_the_document(error: &Value) -> bool {
             .get("message")
             .and_then(Value::as_str)
             .is_some_and(|message| message.contains("No managed text document"))
+}
+
+/// Another `.luaux` in the project, and what it takes to map into it.
+struct Foreign {
+    /// The `.luaux` as the editor knows it.
+    source_uri: String,
+    /// Its build output, as luau-lsp named it.
+    output_uri: String,
+    source: String,
+    output: String,
+    map: crate::sourcemap::SourceMap,
+}
+
+/// Every `uri` named anywhere in a message.
+///
+/// `targetUri` is deliberately not collected: a `LocationLink` holds ranges in
+/// *two* files at once, and treating the whole object as the target's would move
+/// `originSelectionRange` — which belongs to the document that was asked about —
+/// through the wrong map.
+fn collect_uris(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::Array(items) => items.iter().for_each(|item| collect_uris(item, out)),
+        Value::Object(object) => {
+            if let Some(uri) = object.get("uri").and_then(Value::as_str) {
+                if !out.iter().any(|seen| seen == uri) {
+                    out.push(uri.to_string());
+                }
+            }
+
+            object.values().for_each(|item| collect_uris(item, out));
+        }
+        _ => {}
+    }
 }
 
 /// Joins our contribution to the child's, for the requests where both have

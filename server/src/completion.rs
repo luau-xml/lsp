@@ -41,6 +41,13 @@ pub enum Completion {
     /// is rewritten into markup by [`props`], since `Name = x` and `Name={x}`
     /// are the same key spelled for different syntaxes.
     ComponentProps { start: usize, prefix: String },
+    /// A member of a dotted tag name: `<App.|`.
+    ///
+    /// What `App` holds is Luau's to know, exactly as a component's props are —
+    /// the tag compiles to `App.Header(…)`, so the question is a member
+    /// completion on the generated call. Offering the class list here is worse
+    /// than offering nothing: `<App.Accessory/>` is not a thing that exists.
+    TagMembers { start: usize, prefix: String },
     /// A position with nothing to offer. Answered as an empty list rather than
     /// forwarded, so luau-lsp does not suggest Luau symbols inside markup.
     Nothing,
@@ -60,6 +67,11 @@ pub fn complete(
     match &scan.context {
         Context::Luau | Context::Expression { .. } => Completion::Forward,
 
+        // A dot in the name means the list is not classes and not components
+        // bound here — it is whatever the thing before the dot holds.
+        Context::TagName { start, prefix, closing: false } if prefix.contains('.') => {
+            Completion::TagMembers { start: *start, prefix: prefix.clone() }
+        }
         Context::TagName { start, prefix, closing: false } => {
             Completion::Ours(tags(document, project, *start, prefix))
         }
@@ -380,6 +392,44 @@ pub fn props(items: &[Value], range: &Value, snippets: bool) -> Value {
     list(rewritten)
 }
 
+/// The child's members of `App`, as tag names.
+///
+/// Rebuilt rather than relayed, for the same reason [`props`] rebuilds: the
+/// child's `textEdit` is against the generated file, and the range that matters
+/// here is the one segment of the tag name the cursor is in.
+pub fn members(items: &[Value], range: &Value) -> Value {
+    let rewritten = items
+        .iter()
+        .filter_map(|item| {
+            let label = item.get("label").and_then(Value::as_str)?;
+
+            // A key that is not a plain name cannot be written as a tag at all:
+            // `App["my-thing"]` has no markup spelling.
+            if !writable_as_an_attribute(label) {
+                return None;
+            }
+
+            let detail = item.get("detail").and_then(Value::as_str).unwrap_or("member");
+
+            let mut written = json!({
+                "label": label,
+                "kind": kind::FUNCTION,
+                "detail": detail,
+                "sortText": format!("0{label}"),
+                "textEdit": { "range": range, "newText": label },
+            });
+
+            if let Some(documentation) = item.get("documentation") {
+                written["documentation"] = documentation.clone();
+            }
+
+            Some(written)
+        })
+        .collect();
+
+    list(rewritten)
+}
+
 /// `</` completes to whatever is actually open, which is the only useful answer.
 fn close_tag(document: &Document, start: usize, prefix: &str, name: &str) -> Value {
     let end = start + prefix.len();
@@ -445,7 +495,9 @@ mod tests {
                 .map(|item| item["label"].as_str().unwrap_or_default().to_string())
                 .collect(),
             Completion::Forward => panic!("forwarded"),
-            Completion::ComponentProps { .. } | Completion::Nothing => Vec::new(),
+            Completion::ComponentProps { .. }
+            | Completion::TagMembers { .. }
+            | Completion::Nothing => Vec::new(),
         }
     }
 

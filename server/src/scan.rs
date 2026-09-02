@@ -55,6 +55,16 @@ impl Scan {
     }
 }
 
+/// Where the component's own name begins inside a tag name.
+///
+/// A tag name may be a member expression — `<App.Header/>` — because this scan
+/// takes `.` as part of one, and the two ends of such a name answer different
+/// questions. The last segment is the component; everything before it is the
+/// table it came out of.
+pub fn member_offset(name: &str) -> usize {
+    name.rfind('.').map(|dot| dot + 1).unwrap_or(0)
+}
+
 /// Classifies `cursor` — a byte offset — against `source`.
 pub fn scan(source: &str, cursor: usize) -> Scan {
     let mut state = State { source, cursor, found: None, open: Vec::new(), at_cursor: Vec::new() };

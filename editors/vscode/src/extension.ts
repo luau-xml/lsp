@@ -62,6 +62,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         vscode.workspace.createFileSystemWatcher("**/luaux.toml"),
         vscode.workspace.createFileSystemWatcher("**/*.luaux"),
       ],
+      // The server pulls `luaux.*` with `workspace/configuration`, and pulls
+      // again only when it is told the settings changed. The client sends that
+      // for the sections named here and no others, so without this
+      // `luaux.completion.enabled` would do nothing until a restart.
+      configurationSection: "luaux",
     },
     outputChannel: output,
     traceOutputChannel:
