@@ -116,7 +116,13 @@ $ codium --install-extension RyanCundiff.luaux-lsp
 $ code --install-extension luaux-lsp-win32-x64-0.2.0.vsix
 ```
 
-4. **From source**, which needs the compiler as a sibling checkout (see
+4. The **server on its own**, from the same releases page, for another editor
+   or for a project that pins its tools: `luaux-lsp-<version>-<os>-<arch>.zip`,
+   with the one executable inside. Put it on `PATH`, or point `luaux.server.path`
+   at it. The names are `uname`'s — `linux`, `macos`, `windows` and `x86_64`,
+   `aarch64` — which is what rokit reads to pick a file from a release.
+
+5. **From source**, which needs the compiler as a sibling checkout (see
    [Building](#building)):
 
 ```sh

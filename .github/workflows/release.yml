@@ -5,6 +5,11 @@ name: Release
 # works in one place: on any other it dies with `cannot execute binary file`,
 # and the client reports `write EPIPE` five times without naming the reason.
 #
+# Beside each `.vsix`, the same server on its own in a `.zip`. The extension is
+# one way to run it, not the only one: another editor, a `PATH` install and a
+# rokit manifest all want the bare executable, and none of them can open a
+# `.vsix` to get at it.
+#
 # Every target builds on its own runner rather than cross-compiling. The whole
 # dependency tree is pure Rust, so cross-building does work — but a native build
 # is the one that also *runs* its own tests, and needs no linker arrangements to
@@ -39,11 +44,17 @@ jobs:
   versions:
     name: versions
     runs-on: ubuntu-latest
+    # What the build names its archives with. Read once here rather than in six
+    # jobs, and from the manifest rather than the tag, so a rehearsal without a
+    # tag names its files the way a release would.
+    outputs:
+      version: ${{ steps.check.outputs.version }}
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Check the versions agree
+        id: check
         shell: bash
         run: |
           set -euo pipefail
@@ -71,32 +82,45 @@ jobs:
             echo "tag: $GITHUB_REF_NAME"
           fi
 
+          echo "version=$crate" >> "$GITHUB_OUTPUT"
+
   build:
     name: ${{ matrix.target }}
     needs: versions
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
+      # Three names for one platform, because three consumers spell it
+      # differently: `target` is VS Code's, which the `.vsix` has to carry;
+      # `rust` is rustc's; `asset` is the `.zip`'s, in uname's words. Not VS
+      # Code's words there: rokit picks a release asset by reading its file
+      # name, and to it `win32` means a 32-bit build.
       matrix:
         include:
           - target: darwin-arm64
             os: macos-latest
             rust: aarch64-apple-darwin
+            asset: macos-aarch64
           - target: darwin-x64
             os: macos-latest
             rust: x86_64-apple-darwin
+            asset: macos-x86_64
           - target: linux-x64
             os: ubuntu-latest
             rust: x86_64-unknown-linux-gnu
+            asset: linux-x86_64
           - target: linux-arm64
             os: ubuntu-24.04-arm
             rust: aarch64-unknown-linux-gnu
+            asset: linux-aarch64
           - target: win32-x64
             os: windows-latest
             rust: x86_64-pc-windows-msvc
+            asset: windows-x86_64
           - target: win32-arm64
             os: windows-11-arm
             rust: aarch64-pc-windows-msvc
+            asset: windows-aarch64
 
     steps:
       - uses: actions/checkout@v4
@@ -155,6 +179,31 @@ jobs:
         with:
           name: ${{ matrix.target }}
           path: luaux-lsp/editors/vscode/*.vsix
+          if-no-files-found: error
+
+      # The very binary the `.vsix` bundles, on its own: one executable at the
+      # root of the archive and nothing else, so `unzip` leaves `luaux-lsp`
+      # where it was run. A `.zip` on every platform, because that is what the
+      # rest of the Roblox toolchain ships and what rokit already opens; `7z`
+      # is what the Windows runners have, and it stores the bare file name too.
+      #
+      # After packaging rather than before: `package.mjs` runs the binary as a
+      # check, and an archive of one that failed it is not worth having.
+      - name: Archive the server
+        shell: bash
+        working-directory: luaux-lsp
+        run: |
+          archive="luaux-lsp-${{ needs.versions.outputs.version }}-${{ matrix.asset }}.zip"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "$archive" "target/${{ matrix.rust }}/release/luaux-lsp.exe"
+          else
+            zip -j "$archive" "target/${{ matrix.rust }}/release/luaux-lsp"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-${{ matrix.asset }}
+          path: luaux-lsp/*.zip
           if-no-files-found: error
 
   # The server as a crate, so `cargo install luaux-lsp` works and so anything
@@ -245,10 +294,10 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          path: vsix
+          path: assets
           merge-multiple: true
 
-      - run: ls -l vsix
+      - run: ls -l assets
 
       # Always. A GitHub Release needs no account and no secret, so this is the
       # channel that cannot silently fail to exist.
@@ -256,15 +305,22 @@ jobs:
       # `generate_release_notes` has GitHub write the "what changed" half from
       # the pull requests merged since the previous tag, grouped by the
       # categories in `.github/release.yml`. `body` is prepended to it rather
-      # than replacing it — which is the only place to say which of six files a
-      # given machine wants, since the assets themselves cannot explain that.
+      # than replacing it — which is the only place to say which of twelve files
+      # a given machine wants, since the assets themselves cannot explain that.
       - name: Attach to the release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: vsix/*.vsix
+          files: |
+            assets/*.vsix
+            assets/*.zip
           fail_on_unmatched_files: true
           generate_release_notes: true
+          body: |
+            One `.vsix` and one `.zip` per platform: `macos`, `linux` or `windows`, on `x86_64` or `aarch64` (Apple silicon and other Arm machines).
+
+            - **`.vsix`** — the VS Code extension with the server inside it. Install the one for your machine with `code --install-extension`, or get it from the Marketplace or OpenVSX instead.
+            - **`.zip`** — the `luaux-lsp` server on its own, for another editor, for `PATH`, or for rokit. One executable inside, nothing else.
 
       - name: Install the publishing tools
         working-directory: editors/vscode
@@ -315,7 +371,7 @@ jobs:
 
           failed=0
 
-          for vsix in ../../vsix/*.vsix; do
+          for vsix in ../../assets/*.vsix; do
             name=$(basename "$vsix")
 
             if output=$(npx vsce publish --packagePath "$vsix" 2>&1); then
@@ -352,7 +408,7 @@ jobs:
 
           failed=0
 
-          for vsix in ../../vsix/*.vsix; do
+          for vsix in ../../assets/*.vsix; do
             name=$(basename "$vsix")
 
             if output=$(npx ovsx publish --packagePath "$vsix" --pat "$OVSX_PAT" 2>&1); then

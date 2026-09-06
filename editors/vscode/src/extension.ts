@@ -373,11 +373,13 @@ async function runs(candidate: string): Promise<boolean> {
 
 /// What to tell someone, given what the search found.
 function explain(found: Exclude<Found, { kind: "found" }>): string {
-  // Deliberately not "rokit add": there are no published releases yet, and
-  // advice that does not work is worse than none. Revisit once releases have
-  // actually shipped.
+  // Deliberately not "rokit add": rokit names a tool after its repository, and
+  // this one is `luau-xml/lsp`, so what that installs is called `lsp` — in a
+  // directory the search above never looks in. Advice that does not work is
+  // worse than none.
   const install =
-    "Build it from the luaux-lsp repository (`cargo build --release`) and either put it on PATH " +
+    "Download the `.zip` for your platform from https://github.com/luau-xml/lsp/releases, " +
+    "or build it from the luaux-lsp repository (`cargo build --release`), and either put it on PATH " +
     "or point `luaux.server.path` at it.";
 
   if (found.kind === "missing") {
