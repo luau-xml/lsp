@@ -89,11 +89,6 @@ highlighting must never depend on a process being alive.
 
 ## Installation
 
-> [!NOTE]
-> No release is published yet, so building from source is currently the only
-> route. The rest of this section describes where the release workflow publishes
-> to once a `v*` tag is pushed.
-
 1. From the **[Marketplace](https://marketplace.visualstudio.com/)**. Search for
    `LuauX LSP`, or:
 
